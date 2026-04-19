@@ -13,6 +13,7 @@ import mondrian.olap.Util;
 import mondrian.xmla.XmlaServlet;
 
 import java.io.*;
+import jakarta.servlet.ReadListener;
 import jakarta.servlet.ServletInputStream;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
@@ -140,6 +141,19 @@ public class XmlaTestServletRequestWrapper extends HttpServletRequestWrapper {
 
         public long skip(long n) throws IOException {
             return bais.skip(n);
+        }
+
+        public boolean isFinished() {
+            return bais.available() == 0;
+        }
+
+        public boolean isReady() {
+            return true;
+        }
+
+        public void setReadListener(ReadListener readListener) {
+            throw new UnsupportedOperationException(
+                "Async reads not supported by test fixture");
         }
     }
 }
