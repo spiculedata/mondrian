@@ -61,6 +61,12 @@ import javax.sql.DataSource;
  * @since 29 March, 2002
  */
 public class TestContext {
+    static {
+        // Extract the embedded HSQLDB FoodMart fixture before anyone tries to
+        // resolve a connection URL. Idempotent.
+        FoodMartHsqldbBootstrap.ensureExtracted();
+    }
+
     private static TestContext instance; // the singleton
     private PrintWriter pw;
 

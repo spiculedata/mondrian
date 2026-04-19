@@ -28,6 +28,13 @@ import java.util.*;
  */
 public class FoodMartTestCase extends TestCase {
 
+    static {
+        // Extract the embedded HSQLDB FoodMart fixture (from the
+        // mondrian-data-foodmart-hsql:0.1 test dep) to target/foodmart/ on
+        // first test load, so jdbc:hsqldb:file:target/foodmart/foodmart works.
+        FoodMartHsqldbBootstrap.ensureExtracted();
+    }
+
     /**
      * Access properties via this object and their values will be reset on
      * {@link #tearDown()}.
