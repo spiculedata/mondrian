@@ -1513,9 +1513,9 @@ public class UtilTestCase extends TestCase {
                 "4"
         };
         // Will throw a ClassCastException if it fails.
-        Util.binarySearch(
+        Util.<Comparable>binarySearch(
             compArray, 0, compArray.length,
-            RolapUtil.sqlNullValue);
+            (Comparable) RolapUtil.sqlNullValue);
     }
 
     public void testDirectedGraph() {

@@ -13,7 +13,7 @@ import java.io.InputStream;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.*;
-import javax.servlet.*;
+import jakarta.servlet.*;
 
 /**
  * Partial implementation of the {@link ServletContext} where just
@@ -285,6 +285,42 @@ public class MockServletContext implements ServletContext {
             this.parameters.setProperty(name, value);
         }
     }
+
+    public void setResponseCharacterEncoding(String encoding) {}
+    public String getResponseCharacterEncoding() { return null; }
+    public void setRequestCharacterEncoding(String encoding) {}
+    public String getRequestCharacterEncoding() { return null; }
+    public int getSessionTimeout() { return 0; }
+    public void setSessionTimeout(int timeout) {}
+    public String getVirtualServerName() { return ""; }
+    public int getEffectiveMajorVersion() { return majorVersion; }
+    public int getEffectiveMinorVersion() { return minorVersion; }
+    public jakarta.servlet.ServletRegistration getServletRegistration(String name) { return null; }
+    public java.util.Map<String,? extends jakarta.servlet.ServletRegistration> getServletRegistrations() { return java.util.Collections.emptyMap(); }
+    public jakarta.servlet.FilterRegistration getFilterRegistration(String name) { return null; }
+    public java.util.Map<String,? extends jakarta.servlet.FilterRegistration> getFilterRegistrations() { return java.util.Collections.emptyMap(); }
+    public jakarta.servlet.SessionCookieConfig getSessionCookieConfig() { return null; }
+    public void setSessionTrackingModes(java.util.Set<jakarta.servlet.SessionTrackingMode> modes) {}
+    public java.util.Set<jakarta.servlet.SessionTrackingMode> getDefaultSessionTrackingModes() { return java.util.Collections.emptySet(); }
+    public java.util.Set<jakarta.servlet.SessionTrackingMode> getEffectiveSessionTrackingModes() { return java.util.Collections.emptySet(); }
+    public void addListener(String className) {}
+    public <T extends java.util.EventListener> void addListener(T t) {}
+    public void addListener(Class<? extends java.util.EventListener> listenerClass) {}
+    public <T extends java.util.EventListener> T createListener(Class<T> clazz) { return null; }
+    public jakarta.servlet.descriptor.JspConfigDescriptor getJspConfigDescriptor() { return null; }
+    public ClassLoader getClassLoader() { return getClass().getClassLoader(); }
+    public void declareRoles(String... roleNames) {}
+    public jakarta.servlet.ServletRegistration.Dynamic addServlet(String name, String className) { return null; }
+    public jakarta.servlet.ServletRegistration.Dynamic addServlet(String name, jakarta.servlet.Servlet servlet) { return null; }
+    public jakarta.servlet.ServletRegistration.Dynamic addServlet(String name, Class<? extends jakarta.servlet.Servlet> clazz) { return null; }
+    public jakarta.servlet.ServletRegistration.Dynamic addJspFile(String name, String jspFile) { return null; }
+    public <T extends jakarta.servlet.Servlet> T createServlet(Class<T> clazz) { return null; }
+    public jakarta.servlet.FilterRegistration.Dynamic addFilter(String name, String className) { return null; }
+    public jakarta.servlet.FilterRegistration.Dynamic addFilter(String name, jakarta.servlet.Filter filter) { return null; }
+    public jakarta.servlet.FilterRegistration.Dynamic addFilter(String name, Class<? extends jakarta.servlet.Filter> clazz) { return null; }
+    public <T extends jakarta.servlet.Filter> T createFilter(Class<T> clazz) { return null; }
+    public boolean setInitParameter(String name, String value) { this.parameters.setProperty(name, value); return true; }
+    public String getContextPath() { return ""; }
 }
 
 // End MockServletContext.java

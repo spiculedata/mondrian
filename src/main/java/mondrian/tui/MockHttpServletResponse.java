@@ -13,9 +13,9 @@ import java.io.*;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.*;
-import javax.servlet.ServletOutputStream;
-import javax.servlet.http.Cookie;
-import javax.servlet.http.HttpServletResponse;
+import jakarta.servlet.ServletOutputStream;
+import jakarta.servlet.http.Cookie;
+import jakarta.servlet.http.HttpServletResponse;
 
 /**
  * This is a partial implementation of the HttpServletResponse where just
@@ -74,6 +74,8 @@ public class MockHttpServletResponse implements HttpServletResponse {
         public void clearContent() {
             buffer = new ByteArrayOutputStream();
         }
+        public boolean isReady() { return true; }
+        public void setWriteListener(jakarta.servlet.WriteListener listener) {}
     }
 
 
@@ -455,6 +457,13 @@ public class MockHttpServletResponse implements HttpServletResponse {
     }
 
 
+    public java.util.Collection<String> getHeaderNames() { return headers.keySet(); }
+    public java.util.Collection<String> getHeaders(String name) {
+        List<String> values = headers.get(name);
+        return values == null ? java.util.Collections.emptyList() : values;
+    }
+    public int getStatus() { return statusCode; }
+    public void setContentLengthLong(long len) {}
 }
 
 // End MockHttpServletResponse.java

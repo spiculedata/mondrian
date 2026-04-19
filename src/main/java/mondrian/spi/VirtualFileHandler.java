@@ -30,7 +30,6 @@ public interface VirtualFileHandler {
     Logger LOGGER = Logger.getLogger(VirtualFileHandler.class);
 
     String[] BUILTIN_IMPLEMENTATIONS = {
-        "mondrian.spi.impl.ApacheVfsVirtualFileHandler",
         "mondrian.spi.impl.ApacheVfs2VirtualFileHandler",
         "mondrian.spi.impl.JavaNetVirtualFileHandler"
     };

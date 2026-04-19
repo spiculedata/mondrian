@@ -349,7 +349,7 @@ public class DefaultDataServicesProvider implements DataServicesProvider {
         }
 
         public Connection getConnection() throws SQLException {
-            return new org.apache.commons.dbcp.DelegatingConnection(
+            return new org.apache.commons.dbcp2.DelegatingConnection(
                 java.sql.DriverManager.getConnection(
                     jdbcConnectString, jdbcProperties));
         }

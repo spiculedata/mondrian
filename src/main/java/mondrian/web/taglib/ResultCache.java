@@ -17,8 +17,8 @@ import org.apache.log4j.Logger;
 
 import org.w3c.dom.Document;
 
-import javax.servlet.ServletContext;
-import javax.servlet.http.*;
+import jakarta.servlet.ServletContext;
+import jakarta.servlet.http.*;
 import javax.xml.parsers.ParserConfigurationException;
 
 /**

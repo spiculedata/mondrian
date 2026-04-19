@@ -13,9 +13,11 @@ package mondrian.rolap;
 
 import mondrian.olap.Util;
 
-import org.apache.commons.dbcp.*;
-import org.apache.commons.pool.ObjectPool;
-import org.apache.commons.pool.impl.GenericObjectPool;
+import org.apache.commons.dbcp2.*;
+import org.apache.commons.pool2.ObjectPool;
+import org.apache.commons.pool2.impl.AbandonedConfig;
+import org.apache.commons.pool2.impl.GenericObjectPool;
+import org.apache.commons.pool2.impl.GenericObjectPoolConfig;
 
 import java.util.*;
 import javax.sql.DataSource;
@@ -69,14 +71,16 @@ class RolapConnectionPool {
      *   JDBC connect string or DataSource
      * @return a pooling DataSource object
      */
+    @SuppressWarnings("unchecked")
     synchronized DataSource getPoolingDataSource(
         PoolKey key,
         ConnectionFactory connectionFactory,
         boolean mysql)
     {
-        ObjectPool connectionPool = getPool(key, connectionFactory, mysql);
+        ObjectPool<PoolableConnection> connectionPool =
+            (ObjectPool<PoolableConnection>) getPool(key, connectionFactory, mysql);
         // create pooling datasource
-        return new PoolingDataSource(connectionPool);
+        return new PoolingDataSource<>(connectionPool);
     }
 
     /**
@@ -183,53 +187,36 @@ class RolapConnectionPool {
     {
         ObjectPool connectionPool = mapConnectKeyToPool.get(key);
         if (connectionPool == null) {
-            // use GenericObjectPool, which provides for resource limits
-            connectionPool = new GenericObjectPool(
-                null, // PoolableObjectFactory, can be null
-                5000, // max active
-                GenericObjectPool.WHEN_EXHAUSTED_GROW, // action when exhausted
-                3000, // max wait (milli seconds)
-                10, // max idle
-                mysql, // test on borrow
-                false, // test on return
-                60000, // time between eviction runs (millis)
-                5, // number to test on eviction run
-                30000, // min evictable idle time (millis)
-                true); // test while idle
-
-            // create a PoolableConnectionFactory
+            // Abandoned-connection config (surfaces through the pool via setAbandonedConfig).
             AbandonedConfig abandonedConfig = new AbandonedConfig();
-            // flag to remove abandoned connections from pool
-            abandonedConfig.setRemoveAbandoned(true);
-            // timeout (seconds) before removing abandoned connections
+            abandonedConfig.setRemoveAbandonedOnBorrow(true);
             abandonedConfig.setRemoveAbandonedTimeout(300);
-            // Flag to log stack traces for application code which abandoned a
-            // Statement or Connection
             abandonedConfig.setLogAbandoned(true);
-            PoolableConnectionFactory poolableConnectionFactory =
-                new PoolableConnectionFactory(
-                    // the connection factory
-                    connectionFactory,
-                    // the object pool
-                    connectionPool,
-                    // statement pool factory for pooling prepared statements,
-                    // or null for no pooling
-                    null,
-                    // validation query (must return at least 1 row e.g. Oracle:
-                    // select count(*) from dual) to test connection, can be
-                    // null
-                    mysql ? "SELECT 1" : null,
-                    // default "read only" setting for borrowed connections
-                    false,
-                    // default "auto commit" setting for returned connections
-                    true,
-                    // AbandonedConfig object configures how to handle abandoned
-                    // connections
-                    abandonedConfig);
 
-            // "poolableConnectionFactory" has registered itself with
-            // "connectionPool", somehow, so we don't need the value any more.
-            Util.discard(poolableConnectionFactory);
+            PoolableConnectionFactory poolableConnectionFactory =
+                new PoolableConnectionFactory(connectionFactory, null);
+            poolableConnectionFactory.setValidationQuery(
+                mysql ? "SELECT 1" : null);
+            poolableConnectionFactory.setDefaultReadOnly(false);
+            poolableConnectionFactory.setDefaultAutoCommit(true);
+
+            GenericObjectPoolConfig<PoolableConnection> config =
+                new GenericObjectPoolConfig<>();
+            config.setMaxTotal(5000);
+            config.setMaxWaitMillis(3000);
+            config.setMaxIdle(10);
+            config.setTestOnBorrow(mysql);
+            config.setTestOnReturn(false);
+            config.setTimeBetweenEvictionRunsMillis(60000);
+            config.setNumTestsPerEvictionRun(5);
+            config.setMinEvictableIdleTimeMillis(30000);
+            config.setTestWhileIdle(true);
+
+            GenericObjectPool<PoolableConnection> genericPool =
+                new GenericObjectPool<>(poolableConnectionFactory, config, abandonedConfig);
+            poolableConnectionFactory.setPool(genericPool);
+
+            connectionPool = genericPool;
             mapConnectKeyToPool.put(key, connectionPool);
         }
         return connectionPool;

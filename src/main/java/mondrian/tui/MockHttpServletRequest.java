@@ -14,8 +14,8 @@ import java.security.Principal;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.*;
-import javax.servlet.*;
-import javax.servlet.http.*;
+import jakarta.servlet.*;
+import jakarta.servlet.http.*;
 
 /**
  * Partial implementation of the {@link HttpServletRequest} where just
@@ -89,6 +89,9 @@ public class MockHttpServletRequest implements HttpServletRequest {
         public int read() throws IOException {
             return stream.read();
         }
+        public boolean isFinished() { return false; }
+        public boolean isReady() { return true; }
+        public void setReadListener(jakarta.servlet.ReadListener listener) {}
     }
 
 
@@ -856,6 +859,24 @@ public class MockHttpServletRequest implements HttpServletRequest {
     }
 
 
+    public <T extends jakarta.servlet.http.HttpUpgradeHandler> T upgrade(Class<T> handlerClass) { return null; }
+    public String changeSessionId() { return null; }
+    public boolean authenticate(jakarta.servlet.http.HttpServletResponse response) { return false; }
+    public void login(String username, String password) {}
+    public void logout() {}
+    public java.util.Collection<jakarta.servlet.http.Part> getParts() { return java.util.Collections.emptyList(); }
+    public jakarta.servlet.http.Part getPart(String name) { return null; }
+    public jakarta.servlet.AsyncContext startAsync() { throw new IllegalStateException(); }
+    public jakarta.servlet.AsyncContext startAsync(ServletRequest servletRequest, ServletResponse servletResponse) { throw new IllegalStateException(); }
+    public boolean isAsyncStarted() { return false; }
+    public boolean isAsyncSupported() { return false; }
+    public jakarta.servlet.AsyncContext getAsyncContext() { throw new IllegalStateException(); }
+    public jakarta.servlet.DispatcherType getDispatcherType() { return jakarta.servlet.DispatcherType.REQUEST; }
+    public String getRequestId() { return ""; }
+    public String getProtocolRequestId() { return ""; }
+    public jakarta.servlet.ServletConnection getServletConnection() { return null; }
+    public jakarta.servlet.ServletContext getServletContext() { return null; }
+    public long getContentLengthLong() { return getContentLength(); }
 }
 
 // End MockHttpServletRequest.java

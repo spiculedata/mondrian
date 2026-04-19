@@ -12,8 +12,8 @@ package mondrian.web.taglib;
 
 import mondrian.util.ClassResolver;
 
-import javax.servlet.ServletContextEvent;
-import javax.servlet.ServletContextListener;
+import jakarta.servlet.ServletContextEvent;
+import jakarta.servlet.ServletContextListener;
 
 /**
  * <code>Listener</code> creates and destroys a {@link ApplResources} at the
