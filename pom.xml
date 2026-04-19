@@ -65,6 +65,26 @@
     <dependency><groupId>junit</groupId><artifactId>junit</artifactId><version>4.13.2</version><scope>test</scope></dependency>
     <dependency><groupId>xmlunit</groupId><artifactId>xmlunit</artifactId><version>1.6</version><scope>test</scope></dependency>
     <dependency><groupId>org.mockito</groupId><artifactId>mockito-core</artifactId><version>4.11.0</version><scope>test</scope></dependency>
+
+    <!-- FoodMart fixture: pre-loaded HSQLDB 1.8 DB files bundled as foodmart/foodmart.{properties,script}.
+         mondrian-data-foodmart-hsql:0.1 is consumed from the local ~/.m2 cache; it was installed via
+         `mvn install:install-file` and is not available from any public repo (central/atlassian/clojars/apache
+         all return 404). CI will need a repo URL added later — TBD. Sibling saiku-query uses the same artifact
+         plus hsqldb 1.8.0.10 via classpath resource (`jdbc:hsqldb:res:`). -->
+    <dependency>
+      <groupId>mondrian-data-foodmart-hsql</groupId>
+      <artifactId>mondrian-data-foodmart-hsql</artifactId>
+      <version>0.1</version>
+      <scope>test</scope>
+    </dependency>
+    <!-- hsqldb 1.8.0.10 matches the DB-file format (foodmart.properties declares version=1.8.0).
+         Modern 2.x drivers do not round-trip these 1.8 .script files reliably; saiku-query pins 1.8.0.10. -->
+    <dependency>
+      <groupId>hsqldb</groupId>
+      <artifactId>hsqldb</artifactId>
+      <version>1.8.0.10</version>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <build>
