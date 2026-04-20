@@ -80,11 +80,25 @@ public final class CalciteSqlPlanner {
                 // unparser renders that as a CROSS JOIN in most dialects.
                 b.join(JoinRelType.INNER, b.literal(true));
             } else {
-                b.join(
-                    JoinRelType.INNER,
-                    b.equals(
-                        b.field(2, 0, j.factKey),
-                        b.field(2, 1, j.dimKey)));
+                // For single-hop joins (leftTable == null), the LHS is the
+                // fact table; unqualified field(2,0,name) resolves the FK
+                // column in the flat LHS row-type.
+                //
+                // For snowflake multi-hop joins (leftTable != null), the
+                // LHS is an already-joined chain of tables. Use the
+                // alias-qualified field() overload so the FK column is
+                // unambiguously resolved against the LHS's named input —
+                // critical when the same column name (e.g. product_class_id)
+                // appears on more than one table in the chain.
+                org.apache.calcite.rex.RexNode lhs;
+                if (j.leftTable == null) {
+                    lhs = b.field(2, 0, j.factKey);
+                } else {
+                    lhs = b.field(2, j.leftTable, j.factKey);
+                }
+                org.apache.calcite.rex.RexNode rhs =
+                    b.field(2, j.dimTable, j.dimKey);
+                b.join(JoinRelType.INNER, b.equals(lhs, rhs));
             }
         }
 

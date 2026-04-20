@@ -112,20 +112,43 @@ public final class PlannerRequest {
         public final String factKey;
         public final String dimKey;
         public final JoinKind kind;
+        /** Optional LHS of the edge. {@code null} means "the fact table"
+         *  (single-hop, back-compat with callers that only expressed
+         *  fact→dim joins). When non-null, this identifies an already-
+         *  joined table alias on the builder stack so the renderer can
+         *  resolve {@link #factKey} against the correct input of a
+         *  multi-hop snowflake chain (Task I). */
+        public final String leftTable;
         public Join(String dimTable, String factKey, String dimKey) {
-            this(dimTable, factKey, dimKey, JoinKind.INNER);
+            this(dimTable, factKey, dimKey, JoinKind.INNER, null);
         }
         public Join(
             String dimTable, String factKey, String dimKey, JoinKind kind)
+        {
+            this(dimTable, factKey, dimKey, kind, null);
+        }
+        public Join(
+            String dimTable, String factKey, String dimKey, JoinKind kind,
+            String leftTable)
         {
             this.dimTable = dimTable;
             this.factKey = factKey;
             this.dimKey = dimKey;
             this.kind = kind;
+            this.leftTable = leftTable;
         }
         /** Convenience factory for an unconditional CROSS JOIN. */
         public static Join cross(String dimTable) {
-            return new Join(dimTable, null, null, JoinKind.CROSS);
+            return new Join(dimTable, null, null, JoinKind.CROSS, null);
+        }
+        /** Convenience factory for an inner equi-join whose LHS is an
+         *  already-joined non-fact table (Task I snowflake multi-hop). */
+        public static Join chained(
+            String leftTable, String leftKey,
+            String dimTable, String dimKey)
+        {
+            return new Join(
+                dimTable, leftKey, dimKey, JoinKind.INNER, leftTable);
         }
     }
 

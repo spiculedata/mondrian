@@ -452,8 +452,11 @@ public final class CalcitePlannerAdapters {
         PlannerRequest.Builder b = PlannerRequest.builder(factName);
 
         // Track joined dimension aliases so we don't emit duplicate joins
-        // if two grouping columns share the same dim.
+        // if two grouping columns share the same dim. For snowflake
+        // multi-hop chains (Task I) this holds every intermediate edge we
+        // have already stitched into the request.
         java.util.Set<String> joinedAliases = new java.util.LinkedHashSet<>();
+        joinedAliases.add(factTable.getAlias());
 
         RolapStar.Column[] columns = gs.getColumns();
         StarColumnPredicate[] predicates = gs.getPredicates();
@@ -476,12 +479,11 @@ public final class CalcitePlannerAdapters {
             String colTableAlias = colTable.getAlias();
             String colName = ((RolapSchema.PhysRealColumn) expr).name;
 
-            // If the column hangs off a dim table, ensure a join edge is
-            // present. Worktree-#1 supports single-hop dims only.
+            // If the column hangs off a dim table, ensure every edge from
+            // the fact to that table has been stitched into the request.
+            // Task I: snowflake multi-hop chains (path length > 2).
             if (colTable != factTable) {
-                if (joinedAliases.add(colTableAlias)) {
-                    addSingleHopJoin(b, factTable, colTable);
-                }
+                ensureJoinedChain(b, factTable, colTable, joinedAliases);
             }
 
             b.addGroupBy(
@@ -511,8 +513,8 @@ public final class CalcitePlannerAdapters {
             java.util.Set<RolapStar.Table> compoundTables =
                 collectCompoundTables(compoundPredicateList, star);
             for (RolapStar.Table t : compoundTables) {
-                if (t != factTable && joinedAliases.add(t.getAlias())) {
-                    addSingleHopJoin(b, factTable, t);
+                if (t != factTable) {
+                    ensureJoinedChain(b, factTable, t, joinedAliases);
                 }
             }
             for (StarPredicate sp : compoundPredicateList) {
@@ -554,58 +556,174 @@ public final class CalcitePlannerAdapters {
         return b.build();
     }
 
-    private static void addSingleHopJoin(
+    /**
+     * Stitch every join edge from {@code factTable} to {@code leaf} into
+     * the request, in fact→leaf order, skipping edges already emitted.
+     *
+     * <p>Walks {@link RolapStar.Table#getParentTable()} from {@code leaf}
+     * up to {@code factTable}, then replays the chain downward so the
+     * renderer sees fact first, then each intermediate dim in attachment
+     * order. Each edge is translated from the {@link RolapSchema.PhysLink}
+     * on that intermediate table's last {@link RolapSchema.PhysHop}.
+     *
+     * <p>For the first-hop edge (child of fact), the emitted Join keeps
+     * {@code leftTable == null} — back-compat with single-hop callers and
+     * with the renderer's fact-rooted {@code b.field(2, 0, ...)} lookup.
+     * For every subsequent edge, {@code leftTable} is set to the parent
+     * table's alias so the renderer can disambiguate columns that share
+     * names across the chain (e.g. {@code product_class_id}).
+     */
+    private static void ensureJoinedChain(
         PlannerRequest.Builder b,
         RolapStar.Table factTable,
-        RolapStar.Table dimTable)
+        RolapStar.Table leaf,
+        java.util.Set<String> joinedAliases)
     {
-        RolapSchema.PhysPath path = dimTable.getPath();
-        if (path.hopList.size() != 2) {
-            throw new UnsupportedTranslation(
-                "fromSegmentLoad: only single-hop dimension joins "
-                + "supported; path length=" + path.hopList.size());
+        // Collect fact → leaf chain (excluding fact itself).
+        java.util.Deque<RolapStar.Table> chain = new java.util.ArrayDeque<>();
+        for (RolapStar.Table t = leaf; t != null && t != factTable;
+             t = t.getParentTable())
+        {
+            chain.push(t);
         }
-        RolapSchema.PhysHop lastHop = path.hopList.get(1);
+        if (chain.isEmpty()) {
+            return;
+        }
+        // Sanity: the top of the chain's parent must be the fact (the
+        // walk terminated on `t == factTable`). If it didn't, we never
+        // reached the fact — bail.
+        RolapStar.Table top = chain.peek();
+        if (top.getParentTable() != factTable) {
+            throw new UnsupportedTranslation(
+                "fromSegmentLoad: dim table " + leaf.getAlias()
+                + " does not descend from fact "
+                + factTable.getAlias());
+        }
+
+        RolapStar.Table prev = factTable;
+        while (!chain.isEmpty()) {
+            RolapStar.Table next = chain.pop();
+            String nextAlias = next.getAlias();
+            if (!joinedAliases.add(nextAlias)) {
+                prev = next;
+                continue;
+            }
+            addChainEdge(b, prev, next);
+            prev = next;
+        }
+    }
+
+    /**
+     * Emit a single chain edge: join {@code parent}'s row on LHS to
+     * {@code child}'s row on RHS. The {@link RolapSchema.PhysLink} is
+     * read from {@code child.getPath()}'s last hop, where
+     * {@code link.targetRelation} is the FK-bearing relation (the RHS
+     * from the link's perspective) and {@code link.sourceKey.relation}
+     * is the PK-bearing relation.
+     *
+     * <p>In a classic star schema the parent is fact and the FK lives on
+     * fact; in a snowflake mid-chain the parent is itself a dim that
+     * bears the FK to the child dim. Either way, FK-side = link target,
+     * PK-side = link source — nothing in the link itself changes.
+     */
+    private static void addChainEdge(
+        PlannerRequest.Builder b,
+        RolapStar.Table parent,
+        RolapStar.Table child)
+    {
+        RolapSchema.PhysPath path = child.getPath();
+        if (path.hopList.isEmpty()) {
+            throw new UnsupportedTranslation(
+                "fromSegmentLoad: empty PhysPath on "
+                + child.getAlias());
+        }
+        RolapSchema.PhysHop lastHop =
+            path.hopList.get(path.hopList.size() - 1);
         RolapSchema.PhysLink link = lastHop.link;
         if (link == null) {
             throw new UnsupportedTranslation(
-                "fromSegmentLoad: null link on dim hop");
+                "fromSegmentLoad: null link on dim hop for "
+                + child.getAlias());
         }
         List<RolapSchema.PhysColumn> fkCols = link.getColumnList();
         if (fkCols.size() != 1) {
             throw new UnsupportedTranslation(
-                "fromSegmentLoad: composite join keys not supported");
+                "fromSegmentLoad: composite join keys not supported "
+                + "(edge " + parent.getAlias() + "→" + child.getAlias()
+                + ", arity=" + fkCols.size() + ")");
         }
         RolapSchema.PhysColumn fkCol = fkCols.get(0);
         if (!(fkCol instanceof RolapSchema.PhysRealColumn)) {
             throw new UnsupportedTranslation(
-                "fromSegmentLoad: non-real FK column");
+                "fromSegmentLoad: non-real FK column on edge "
+                + parent.getAlias() + "→" + child.getAlias());
         }
         RolapSchema.PhysKey srcKey = link.getSourceKey();
         List<RolapSchema.PhysColumn> pkCols = srcKey.getColumnList();
         if (pkCols.size() != 1) {
             throw new UnsupportedTranslation(
-                "fromSegmentLoad: composite PK keys not supported");
+                "fromSegmentLoad: composite PK keys not supported "
+                + "(edge " + parent.getAlias() + "→" + child.getAlias()
+                + ")");
         }
         RolapSchema.PhysColumn pkCol = pkCols.get(0);
         if (!(pkCol instanceof RolapSchema.PhysRealColumn)) {
             throw new UnsupportedTranslation(
-                "fromSegmentLoad: non-real PK column");
+                "fromSegmentLoad: non-real PK column on edge "
+                + parent.getAlias() + "→" + child.getAlias());
         }
-        // Verify the FK really lives on the fact table (target of link).
-        if (link.targetRelation != factTable.getRelation()) {
+        // Figure out which side of the link is parent vs child. The FK
+        // column lives on link.targetRelation; the PK column on
+        // link.sourceKey.relation. Either could be parent or child
+        // depending on hop direction.
+        RolapSchema.PhysRelation parentRel = parent.getRelation();
+        RolapSchema.PhysRelation childRel = child.getRelation();
+        String fkColName = ((RolapSchema.PhysRealColumn) fkCol).name;
+        String pkColName = ((RolapSchema.PhysRealColumn) pkCol).name;
+        String leftKey;
+        String rightKey;
+        if (link.targetRelation == parentRel
+            && srcKey.getRelation() == childRel)
+        {
+            // Parent holds the FK (e.g. fact→product: fact.product_id
+            // points at product.product_id PK).
+            leftKey = fkColName;
+            rightKey = pkColName;
+        } else if (link.targetRelation == childRel
+            && srcKey.getRelation() == parentRel)
+        {
+            // Parent holds the PK; child holds the FK. In FoodMart this
+            // is rare at the fact→dim edge but plausible mid-chain if the
+            // schema is declared with the "reverse" link orientation.
+            leftKey = pkColName;
+            rightKey = fkColName;
+        } else {
             throw new UnsupportedTranslation(
-                "fromSegmentLoad: multi-hop / snowflake join not supported");
+                "fromSegmentLoad: PhysLink endpoints do not match the "
+                + "parent/child RolapStar.Table pair "
+                + "(edge " + parent.getAlias() + "→" + child.getAlias()
+                + "; link "
+                + (link.targetRelation == null
+                    ? "null"
+                    : link.targetRelation.getAlias())
+                + "→"
+                + (srcKey.getRelation() == null
+                    ? "null"
+                    : srcKey.getRelation().getAlias())
+                + ")");
         }
-        if (srcKey.getRelation() != dimTable.getRelation()) {
-            throw new UnsupportedTranslation(
-                "fromSegmentLoad: dim relation mismatch");
-        }
-        String factKey = ((RolapSchema.PhysRealColumn) fkCol).name;
-        String dimKey = ((RolapSchema.PhysRealColumn) pkCol).name;
+        // Fact-rooted edge: keep leftTable null for back-compat with
+        // single-hop callers and the renderer's b.field(2,0,...) path.
+        // Snowflake mid-chain edge: set leftTable to the parent alias.
+        String leftTableAlias =
+            parent.getParentTable() == null ? null : parent.getAlias();
         b.addJoin(
             new PlannerRequest.Join(
-                dimTable.getAlias(), factKey, dimKey));
+                child.getAlias(),
+                leftKey,
+                rightKey,
+                PlannerRequest.JoinKind.INNER,
+                leftTableAlias));
     }
 
     /**

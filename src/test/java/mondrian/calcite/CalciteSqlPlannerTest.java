@@ -224,6 +224,53 @@ public class CalciteSqlPlannerTest {
     }
 
     @Test
+    public void snowflakeMultiHopEmitsChainedJoins() {
+        // Task I: PlannerRequest carries a two-edge snowflake chain:
+        //   sales_fact_1997 -> product (product_id)
+        //                   -> product_class (product_class_id)
+        // The second Join's leftTable=product identifies the already-
+        // joined LHS so the renderer resolves product.product_class_id
+        // unambiguously.
+        CalciteSqlPlanner planner = plannerFor(HsqldbSqlDialect.DEFAULT);
+        PlannerRequest req = PlannerRequest.builder("sales_fact_1997")
+            .addJoin(new PlannerRequest.Join(
+                "product", "product_id", "product_id"))
+            .addJoin(PlannerRequest.Join.chained(
+                "product", "product_class_id",
+                "product_class", "product_class_id"))
+            .addGroupBy(
+                new PlannerRequest.Column(
+                    "product_class", "product_family"))
+            .addMeasure(new PlannerRequest.Measure(
+                PlannerRequest.AggFn.SUM,
+                new PlannerRequest.Column("sales_fact_1997", "unit_sales"),
+                "m"))
+            .build();
+        String sql = planner.plan(req);
+        assertNotNull(sql);
+        String lower = sql.toLowerCase();
+        // Both hops must appear in the FROM/JOIN structure.
+        assertTrue("expected product in: " + sql,
+            lower.contains("product"));
+        assertTrue("expected product_class in: " + sql,
+            lower.contains("product_class"));
+        assertTrue("expected product_family in: " + sql,
+            lower.contains("product_family"));
+        assertTrue("expected sales_fact_1997 in: " + sql,
+            lower.contains("sales_fact_1997"));
+        // There must be at least two INNER JOINs (or one JOIN + a comma-
+        // from in degenerate dialects). For HSQLDB via Calcite, expect
+        // the explicit JOIN keyword to appear twice.
+        int joinCount = 0;
+        int idx = 0;
+        while ((idx = lower.indexOf(" join ", idx)) >= 0) {
+            joinCount++;
+            idx += 5;
+        }
+        assertTrue("expected >=2 JOIN keywords in: " + sql, joinCount >= 2);
+    }
+
+    @Test
     public void dialectAwareness() {
         // Baseline HSQLDB dialect uses double-quoted identifiers; build a
         // custom-context variant using backtick identifier quoting so the

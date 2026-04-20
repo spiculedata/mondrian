@@ -332,3 +332,71 @@ Legacy harness: 34/34 (translator-only change).
 
 Both `composite-key` and `multi-target crossjoin` rows have dropped off
 entirely; 12 first-throws now sit on the snowflake gate.
+
+### Task I update — snowflake multi-hop joins in `fromSegmentLoad`
+
+`CalcitePlannerAdapters.fromSegmentLoad` now walks every edge from the
+fact table to any referenced dim table, emitting one
+`PlannerRequest.Join` per edge. The walk climbs
+`RolapStar.Table.getParentTable()` from the referenced leaf up to the
+fact, then replays the chain downward so joins appear in fact→leaf
+order. Deduping across multiple referenced leaves happens via the
+shared `joinedAliases` set — if two branches share a prefix (e.g.
+`product` and `product_class` both need the fact→product edge) the
+shared edge is emitted once.
+
+The per-edge translator reads `child.getPath()`'s last hop for the
+`PhysLink` and figures out which side of the link is parent vs child.
+In FoodMart's canonical snowflake (`sales_fact_1997 → product →
+product_class`) the FK lives on the "closer-to-fact" side at every
+hop, but the code handles the reverse orientation too, for schemas
+that declare links in the opposite direction mid-chain.
+
+`PlannerRequest.Join` gained an optional `leftTable` field. `null`
+keeps the back-compat semantic ("LHS is the fact table"); non-null
+names an already-joined table alias on the LHS — needed at the second
+and later hops of a snowflake chain so the renderer can disambiguate
+column names that recur across the chain (e.g. `product_class_id`
+appears on both `product` and `product_class`). A `Join.chained(...)`
+factory documents the snowflake-edge usage.
+
+`CalciteSqlPlanner` honours `leftTable` via Calcite's alias-qualified
+`RelBuilder.field(int, String, String)` overload for the LHS and always
+uses the alias-qualified overload for the RHS, so multi-hop joins no
+longer rely on column-name uniqueness across the chain.
+
+`addSingleHopJoin` has been replaced by `ensureJoinedChain`, which
+covers the single-hop case as a degenerate path of length 1. The
+explicit `path.hopList.size() != 2` reject message is gone.
+
+The harness moved **16/34 → 17/34** passing. Only one net pass gain,
+but the snowflake first-throw bucket (12 queries) has dropped off the
+table entirely — the nine queries that no longer throw at the
+snowflake gate advance to a new class of failure: **LEGACY_DRIFT on
+cell-set output** at composite-key-driven level-member readers (a
+latent Task-H projection-order bug that was masked while snowflake
+translation was blocking execution). Those sit as drift failures
+under the equivalence harness rather than translator throws. Specific
+queries surfaced as drift: `crossjoin`, `calc-member`, `slicer-where`,
+`order`, `iif`, `agg-distinct-count-product-family-weekly`,
+`agg-distinct-count-customers-levels`.
+
+Legacy harness: 34/34 (translator-only change).
+
+### Post-Task-I first-throw bucket distribution
+
+| Count | First `UnsupportedTranslation` / drift signal |
+|-------|-----------------------------------------------|
+| 3     | `fromTupleRead: non-default TupleConstraint … RolapNativeTopCount$TopCountConstraint` |
+| 2     | `fromTupleRead: non-default TupleConstraint … RolapNativeFilter$FilterConstraint` |
+| 2     | `fromTupleRead: non-default TupleConstraint … RolapNativeCrossJoin$NonEmptyCrossJoinConstraint` |
+| 2     | `fromSegmentLoad: OrPredicate across columns not yet supported (cols=2)` |
+| 2     | `fromSegmentLoad: OrPredicate across columns not yet supported (cols=1)` |
+| 1     | `fromTupleRead: non-default TupleConstraint … DescendantsConstraint` |
+| 7     | `LEGACY_DRIFT` on cellSet — composite-key level-member projection ordering (parent-level family name appears at child position on the axis) |
+
+The snowflake bucket of 12 has dropped off entirely. The
+TupleConstraint family (TopCount / Filter / CrossJoin / Descendants)
+is now the dominant remaining translator blocker (8 queries). The
+`LEGACY_DRIFT` bucket is new — all 7 entries are the same
+composite-key tuple-read projection-order bug (Task J).
