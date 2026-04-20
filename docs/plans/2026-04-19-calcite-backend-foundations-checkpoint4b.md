@@ -550,23 +550,45 @@ expression tree would ship more surface than is currently used.
 | Run | Pass count |
 |-----|-----------|
 | Legacy (`-Dmondrian.backend=legacy`) | 34/34 |
-| Calcite (`-Pcalcite-harness`)        | **25/34** (was 23/34) |
+| Calcite (`-Pcalcite-harness`)        | **26/34** (was 23/34) |
 
-Net +2 passes; all four OR-across-columns queries now translate (zero
-`OrPredicate` throws in harness output). One of them surfaces a new
-`LEGACY_DRIFT` on `sqlExecution[6]` (row-count 1 vs 2) — i.e. the shape
-translates but the resulting cell-set differs from legacy on one query.
-The other two wins are clean.
+Net +3 passes after the Task M.1 follow-up (`c1b84ce`). All four
+OR-across-columns queries translate (zero `OrPredicate` throws in
+harness output).
 
-### Post-Task-M first-throw bucket distribution
+### Task M.1 — thread-race fix on agg-distinct-count-quarters
 
-| Count | First `UnsupportedTranslation` / drift signal |
-|-------|-----------------------------------------------|
-| 3     | `fromTupleRead: non-default TupleConstraint … RolapNativeTopCount$TopCountConstraint` |
-| 2     | `fromTupleRead: non-default TupleConstraint … RolapNativeFilter$FilterConstraint` |
-| 2     | `fromTupleRead: non-default TupleConstraint … RolapNativeCrossJoin$NonEmptyCrossJoinConstraint` |
-| 1     | `fromTupleRead: non-default TupleConstraint … DescendantsConstraint` |
-| 1     | `LEGACY_DRIFT` on `sqlExecution[6]` (cell-set row-count 1 vs 2; post-TupleFilter shape) |
+Post-Task-M surfaced a `LEGACY_DRIFT` on `agg-distinct-count-quarters`
+at `sqlExecution[6]` (rowCount 1 vs 2; checksum matched legacy seq=7,
+not seq=6). Root cause: `SegmentLoader` was pre-translating on the
+`SegmentCacheManager.sqlExecutor` *worker* thread. On first touch the
+per-star `CalciteSqlPlanner` reflects JDBC metadata (tens of ms); when
+Mondrian submits two segment loads for a single MDX query, the loser
+of the schema-init race commits its ResultSet *after* the follow-up
+request. That flipped `SqlCapture`'s `seq` assignment. Legacy path
+does almost no work before `RolapUtil.executeQuery`, so the ordering
+was always stable; Calcite exposed the race.
 
-The `OrPredicate` family (4 queries) has dropped off entirely. The
-dominant remaining blocker is the `TupleConstraint` family (8 queries).
+Fix (`src/main/java/mondrian/rolap/agg/SegmentLoader.java`): move
+Calcite translation onto the submitter thread, before
+`sqlExecutor.submit(...)`. `SegmentLoadCommand` gains a
+`precomputedCalciteSql` field; worker threads now only run JDBC, so
+completion order tracks submit order — matching legacy.
+
+Regression guard: `CalciteSqlPlannerTest.tupleFilterDoesNotLeakIntoGroupBy`
+codifies "filter columns must not appear in GROUP BY" as
+defence-in-depth.
+
+### Post-Task-M.1 first-throw bucket distribution
+
+| Count | First `UnsupportedTranslation` |
+|-------|--------------------------------|
+| 3     | `fromTupleRead: RolapNativeTopCount$TopCountConstraint` |
+| 2     | `fromTupleRead: RolapNativeFilter$FilterConstraint` |
+| 2     | `fromTupleRead: RolapNativeCrossJoin$NonEmptyCrossJoinConstraint` |
+| 1     | `fromTupleRead: DescendantsConstraint` |
+
+The `OrPredicate` family (4 queries) and the thread-race
+`LEGACY_DRIFT` (1 query) have both dropped off entirely. The entire
+remaining blocker set is the `RolapNative*` `TupleConstraint`
+family — explicit worktree #2 scope per the design doc.
