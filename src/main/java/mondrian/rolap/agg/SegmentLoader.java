@@ -10,6 +10,9 @@
 */
 package mondrian.rolap.agg;
 
+import mondrian.calcite.CalcitePlannerAdapters;
+import mondrian.calcite.MondrianBackend;
+import mondrian.calcite.UnsupportedTranslation;
 import mondrian.olap.MondrianException;
 import mondrian.olap.MondrianProperties;
 import mondrian.olap.Util;
@@ -629,10 +632,32 @@ public class SegmentLoader {
                     }
             };
 
+        // Worktree-#1 dispatch: when the calcite backend is selected,
+        // attempt to obtain the SQL string from CalciteSqlPlanner via
+        // CalcitePlannerAdapters.fromSegmentLoad. Translation coverage
+        // is incomplete; on UnsupportedTranslation we fall back to the
+        // legacy AggregationManager-built string so the harness keeps
+        // making progress. The RolapUtil.executeQuery / SqlInterceptor
+        // seam below is unchanged: both backends feed the same JDBC call.
+        String sql = pair.left;
+        if (MondrianBackend.current().isCalcite()) {
+            try {
+                CalcitePlannerAdapters.fromSegmentLoad(groupingSetsList);
+                // If a translation succeeded, we'd swap `sql` here.
+                // Worktree #1 always throws above, so this is a no-op.
+            } catch (UnsupportedTranslation ex) {
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug(
+                        "Calcite backend: segment-load fell back to "
+                        + "legacy SQL: " + ex.getMessage());
+                }
+            }
+        }
+
         try {
             return RolapUtil.executeQuery(
                 star.getDataSource(),
-                pair.left,
+                sql,
                 pair.right,
                 0,
                 0,
