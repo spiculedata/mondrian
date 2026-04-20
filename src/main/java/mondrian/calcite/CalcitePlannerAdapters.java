@@ -31,31 +31,37 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>Worktree #1 scope: the translation surface here is intentionally
  * minimal. The {@code SqlTupleReader} dispatch wires up the routing seam,
  * but actual translation coverage grows in later worktrees. When a shape
- * cannot be translated, methods throw {@link UnsupportedTranslation} so the
- * caller can fall back to the legacy {@code SqlQuery}-built string.
+ * cannot be translated, methods throw {@link UnsupportedTranslation}.
  *
- * <p>A static {@link AtomicLong} counter records every fallback so the
- * harness / observability layer can spot regressions in translation
- * coverage as it expands.
+ * <p>Under {@code backend=calcite} there is no fallback: the exception
+ * propagates to the caller and the query (or test) fails. This is
+ * deliberate — once worktree #4 deletes {@code SqlQuery} and the legacy
+ * dialects there is no fallback to fall back to, and production deployments
+ * cannot silently depend on which shapes the translator happens to cover.
+ *
+ * <p>The {@link AtomicLong} counters below remain as pure observability:
+ * they record the number of shapes that failed translation in this run,
+ * for tests to observe (e.g. "translation must have succeeded zero times
+ * on this code path") — not as a fallback signal.
  */
 public final class CalcitePlannerAdapters {
 
     private CalcitePlannerAdapters() {}
 
-    private static final AtomicLong UNSUPPORTED_FALLBACK_COUNT =
+    private static final AtomicLong UNSUPPORTED_COUNT =
         new AtomicLong();
 
     /**
-     * Per-dispatch-surface fallback counters. Lets tests assert that e.g.
-     * segment-load translation reached coverage while tuple-read is still
-     * deferred. The aggregate {@link #UNSUPPORTED_FALLBACK_COUNT} stays as
-     * the legacy single-number signal.
+     * Per-dispatch-surface unsupported counters. Lets tests assert that
+     * e.g. segment-load translation reached coverage while tuple-read is
+     * still deferred. The aggregate {@link #UNSUPPORTED_COUNT} stays as a
+     * single-number signal.
      */
-    private static final AtomicLong SEGMENT_LOAD_FALLBACK_COUNT =
+    private static final AtomicLong SEGMENT_LOAD_UNSUPPORTED_COUNT =
         new AtomicLong();
-    private static final AtomicLong TUPLE_READ_FALLBACK_COUNT =
+    private static final AtomicLong TUPLE_READ_UNSUPPORTED_COUNT =
         new AtomicLong();
-    private static final AtomicLong CARDINALITY_PROBE_FALLBACK_COUNT =
+    private static final AtomicLong CARDINALITY_PROBE_UNSUPPORTED_COUNT =
         new AtomicLong();
 
     /**
@@ -75,11 +81,11 @@ public final class CalcitePlannerAdapters {
      * @throws UnsupportedTranslation always (worktree #1).
      */
     public static PlannerRequest fromTupleRead(Object tupleReadContext) {
-        TUPLE_READ_FALLBACK_COUNT.incrementAndGet();
-        recordFallback();
+        TUPLE_READ_UNSUPPORTED_COUNT.incrementAndGet();
+        UNSUPPORTED_COUNT.incrementAndGet();
         throw new UnsupportedTranslation(
             "CalcitePlannerAdapters.fromTupleRead: tuple-read translation "
-            + "is deferred to a later worktree; falling back to legacy SQL.");
+            + "is deferred to a later worktree.");
     }
 
     /**
@@ -107,8 +113,8 @@ public final class CalcitePlannerAdapters {
      */
     public static PlannerRequest fromSegmentLoad(Object segmentLoadContext) {
         if (!(segmentLoadContext instanceof GroupingSetsList)) {
-            SEGMENT_LOAD_FALLBACK_COUNT.incrementAndGet();
-            recordFallback();
+            SEGMENT_LOAD_UNSUPPORTED_COUNT.incrementAndGet();
+            UNSUPPORTED_COUNT.incrementAndGet();
             throw new UnsupportedTranslation(
                 "CalcitePlannerAdapters.fromSegmentLoad: expected "
                 + "GroupingSetsList context; got "
@@ -136,8 +142,8 @@ public final class CalcitePlannerAdapters {
             return translateSegmentLoad(
                 groupingSetsList, compoundPredicateList);
         } catch (UnsupportedTranslation ex) {
-            SEGMENT_LOAD_FALLBACK_COUNT.incrementAndGet();
-            recordFallback();
+            SEGMENT_LOAD_UNSUPPORTED_COUNT.incrementAndGet();
+            UNSUPPORTED_COUNT.incrementAndGet();
             throw ex;
         }
     }
@@ -390,8 +396,8 @@ public final class CalcitePlannerAdapters {
         try {
             return translateCardinalityProbe(schema, table, column);
         } catch (UnsupportedTranslation ex) {
-            CARDINALITY_PROBE_FALLBACK_COUNT.incrementAndGet();
-            recordFallback();
+            CARDINALITY_PROBE_UNSUPPORTED_COUNT.incrementAndGet();
+            UNSUPPORTED_COUNT.incrementAndGet();
             throw ex;
         }
     }
@@ -427,56 +433,38 @@ public final class CalcitePlannerAdapters {
         return b.build();
     }
 
-    /** Increments the unsupported-fallback counter. */
-    public static void recordFallback() {
-        UNSUPPORTED_FALLBACK_COUNT.incrementAndGet();
+    /** Count of shapes rejected on cardinality-probe dispatch
+     *  (fromCardinalityProbe) — pure observability, not a fallback signal. */
+    public static long cardinalityProbeUnsupportedCount() {
+        return CARDINALITY_PROBE_UNSUPPORTED_COUNT.get();
     }
 
-    /** Increments the segment-load fallback counter (used when the
-     *  planner itself throws after a successful translation attempt,
-     *  so the caller falls back to legacy SQL). */
-    public static void recordSegmentLoadFallback() {
-        SEGMENT_LOAD_FALLBACK_COUNT.incrementAndGet();
-        UNSUPPORTED_FALLBACK_COUNT.incrementAndGet();
+    /** Count of shapes rejected on segment-load dispatch (fromSegmentLoad)
+     *  — pure observability, not a fallback signal. */
+    public static long segmentLoadUnsupportedCount() {
+        return SEGMENT_LOAD_UNSUPPORTED_COUNT.get();
     }
 
-    /** Increments the cardinality-probe fallback counter (used when the
-     *  planner itself throws after a successful translation attempt,
-     *  so the caller falls back to legacy SQL). */
-    public static void recordCardinalityProbeFallback() {
-        CARDINALITY_PROBE_FALLBACK_COUNT.incrementAndGet();
-        UNSUPPORTED_FALLBACK_COUNT.incrementAndGet();
+    /** Count of shapes rejected on tuple-read dispatch (fromTupleRead)
+     *  — pure observability, not a fallback signal. */
+    public static long tupleReadUnsupportedCount() {
+        return TUPLE_READ_UNSUPPORTED_COUNT.get();
     }
 
-    /** Count of fallbacks that happened on cardinality-probe dispatch
-     *  (fromCardinalityProbe). */
-    public static long cardinalityProbeFallbackCount() {
-        return CARDINALITY_PROBE_FALLBACK_COUNT.get();
+    /** Total number of shapes rejected by the translator across every
+     *  dispatch site in this run. Under backend=calcite each increment
+     *  corresponds to an UnsupportedTranslation that propagated to the
+     *  caller (no fallback). */
+    public static long unsupportedCount() {
+        return UNSUPPORTED_COUNT.get();
     }
 
-    /** Count of fallbacks that happened specifically on segment-load
-     *  dispatch (fromSegmentLoad). */
-    public static long segmentLoadFallbackCount() {
-        return SEGMENT_LOAD_FALLBACK_COUNT.get();
-    }
-
-    /** Count of fallbacks that happened specifically on tuple-read
-     *  dispatch (fromTupleRead). */
-    public static long tupleReadFallbackCount() {
-        return TUPLE_READ_FALLBACK_COUNT.get();
-    }
-
-    /** Total number of times a translation fell back to legacy. */
-    public static long unsupportedFallbackCount() {
-        return UNSUPPORTED_FALLBACK_COUNT.get();
-    }
-
-    /** Reset the fallback counter (test-only). */
-    public static void resetFallbackCount() {
-        UNSUPPORTED_FALLBACK_COUNT.set(0L);
-        SEGMENT_LOAD_FALLBACK_COUNT.set(0L);
-        TUPLE_READ_FALLBACK_COUNT.set(0L);
-        CARDINALITY_PROBE_FALLBACK_COUNT.set(0L);
+    /** Reset the unsupported counters (test-only). */
+    public static void resetUnsupportedCount() {
+        UNSUPPORTED_COUNT.set(0L);
+        SEGMENT_LOAD_UNSUPPORTED_COUNT.set(0L);
+        TUPLE_READ_UNSUPPORTED_COUNT.set(0L);
+        CARDINALITY_PROBE_UNSUPPORTED_COUNT.set(0L);
     }
 }
 

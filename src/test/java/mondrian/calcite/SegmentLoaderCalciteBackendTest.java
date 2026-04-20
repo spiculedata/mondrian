@@ -42,12 +42,12 @@ import static org.junit.Assert.*;
 public class SegmentLoaderCalciteBackendTest {
 
     @Before public void resetCounter() {
-        CalcitePlannerAdapters.resetFallbackCount();
+        CalcitePlannerAdapters.resetUnsupportedCount();
     }
 
     @After public void clearBackend() {
         System.clearProperty("mondrian.backend");
-        CalcitePlannerAdapters.resetFallbackCount();
+        CalcitePlannerAdapters.resetUnsupportedCount();
     }
 
     @Test public void fromSegmentLoadThrowsUnsupportedTranslationForNow() {
@@ -72,8 +72,8 @@ public class SegmentLoaderCalciteBackendTest {
         }
     }
 
-    @Test public void unsupportedFallbackCounterIncrements() {
-        long before = CalcitePlannerAdapters.unsupportedFallbackCount();
+    @Test public void unsupportedCounterIncrements() {
+        long before = CalcitePlannerAdapters.unsupportedCount();
         try {
             CalcitePlannerAdapters.fromSegmentLoad(new Object());
         } catch (UnsupportedTranslation ignored) {
@@ -86,7 +86,7 @@ public class SegmentLoaderCalciteBackendTest {
         }
         assertEquals(
             before + 2,
-            CalcitePlannerAdapters.unsupportedFallbackCount());
+            CalcitePlannerAdapters.unsupportedCount());
     }
 
     @Test public void calcitePropertyFlipsCurrentBackend() {
@@ -110,7 +110,7 @@ public class SegmentLoaderCalciteBackendTest {
         System.setProperty("mondrian.backend", "legacy");
         assertSame(MondrianBackend.LEGACY, MondrianBackend.current());
         assertEquals(
-            0L, CalcitePlannerAdapters.unsupportedFallbackCount());
+            0L, CalcitePlannerAdapters.unsupportedCount());
     }
 }
 

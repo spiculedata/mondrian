@@ -16,7 +16,6 @@ import mondrian.calc.impl.ListTupleList;
 import mondrian.calc.impl.UnaryTupleList;
 import mondrian.calcite.CalcitePlannerAdapters;
 import mondrian.calcite.MondrianBackend;
-import mondrian.calcite.UnsupportedTranslation;
 import mondrian.olap.*;
 import mondrian.olap.fun.FunUtil;
 import mondrian.resource.MondrianResource;
@@ -498,28 +497,20 @@ public class SqlTupleReader implements TupleReader {
                 List<SqlStatement.Type> types = pair.right;
                 assert sql != null && !sql.equals("");
 
-                // Worktree-#1 dispatch: when the calcite backend is selected,
-                // attempt to obtain the SQL string from CalciteSqlPlanner via
-                // CalcitePlannerAdapters.fromTupleRead. Translation coverage
-                // is incomplete; on UnsupportedTranslation we fall back to
-                // the legacy SqlQuery-built string so the harness keeps
-                // making progress. The SqlInterceptor / RolapUtil seam below
-                // is unchanged: both backends feed the same JDBC call.
+                // Under backend=calcite, the Calcite path owns the SQL
+                // string end-to-end. UnsupportedTranslation propagates to
+                // the caller — no fallback to the legacy SqlQuery-built
+                // string, because once worktree #4 deletes those classes
+                // there is no fallback. Translator coverage gaps surface as
+                // hard failures: that is the worktree-#2 shopping list.
                 if (MondrianBackend.current().isCalcite()) {
-                    try {
-                        // The shape passed in is left intentionally opaque
-                        // until worktree #2 grows the translator: the dispatch
-                        // seam is what matters here.
-                        CalcitePlannerAdapters.fromTupleRead(targets);
-                        // If a translation succeeded, we'd swap `sql` here.
-                        // Worktree #1 always throws above, so this is a no-op.
-                    } catch (UnsupportedTranslation ex) {
-                        if (LOGGER.isDebugEnabled()) {
-                            LOGGER.debug(
-                                "Calcite backend: tuple-read fell back to "
-                                + "legacy SQL: " + ex.getMessage());
-                        }
-                    }
+                    // The shape passed in is left intentionally opaque
+                    // until worktree #2 grows the translator: the dispatch
+                    // seam is what matters here.
+                    CalcitePlannerAdapters.fromTupleRead(targets);
+                    // If a translation succeeded, we would swap `sql`
+                    // here. Worktree #1 always throws above, which under
+                    // the no-fallback policy fails the caller loudly.
                 }
 
                 stmt = RolapUtil.executeQuery(

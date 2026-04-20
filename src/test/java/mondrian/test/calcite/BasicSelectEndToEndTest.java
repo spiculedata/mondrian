@@ -13,6 +13,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import mondrian.calcite.CalcitePlannerAdapters;
+import mondrian.calcite.UnsupportedTranslation;
 import mondrian.rolap.agg.SegmentLoader;
 import mondrian.test.FoodMartHsqldbBootstrap;
 import mondrian.test.calcite.corpus.SmokeCorpus;
@@ -25,19 +26,25 @@ import org.junit.Test;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 
-import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 /**
- * End-to-end verification that the {@code basic-select} MDX runs under the
- * Calcite backend with SQL emitted by
- * {@link mondrian.calcite.CalciteSqlPlanner} (not the legacy fallback) and
- * produces a cell-set identical to the archived legacy golden.
+ * End-to-end verification of the {@code basic-select} MDX under the Calcite
+ * backend. Under the no-fallback policy (see
+ * {@code 2026-04-19-calcite-backend-foundations-checkpoint4.md § Policy
+ * change: no fallback}), schema initialization for the Sales cube calls
+ * {@code SqlTupleReader.readMembers} to resolve the default member on each
+ * hierarchy, which routes through
+ * {@code CalcitePlannerAdapters.fromTupleRead} — and tuple-read translation
+ * is deferred to worktree #2. So the query currently fails loud with
+ * {@link UnsupportedTranslation}.
  *
- * <p>This is the first genuine end-to-end translation in the rewrite: the
- * segment-load SQL actually goes through Calcite's RelBuilder +
- * RelToSqlConverter. Cell-set parity is the hard gate; SQL-string drift is
- * advisory (by the Task A split).
+ * <p>Prior to the policy change this test asserted cell-set parity with
+ * the archived golden because the translation gap fell back to legacy SQL.
+ * With fallback removed the assertion flips: this test now documents the
+ * hard-fail contract. When worktree #2 lands tuple-read translation, this
+ * test flips back to asserting cell-set parity.
  *
  * <p>Lives under {@code mondrian.test.calcite} (not {@code mondrian.calcite})
  * so it shares the harness's package-private {@code FoodMartCapture} plumbing
@@ -60,49 +67,53 @@ public class BasicSelectEndToEndTest {
     }
 
     @Before public void reset() {
-        CalcitePlannerAdapters.resetFallbackCount();
+        CalcitePlannerAdapters.resetUnsupportedCount();
         SegmentLoader.clearCalcitePlannerCache();
         System.setProperty("mondrian.backend", "calcite");
     }
 
-    @Test public void basicSelectCellSetMatchesLegacyGolden()
+    @Test public void basicSelectFailsLoudOnUnsupportedTupleRead()
         throws Exception
     {
-        // Load the archived legacy golden so we know what cell-set to
-        // expect — it was recorded against the legacy backend and is the
-        // contract Calcite must match.
         ObjectMapper mapper = new ObjectMapper();
         JsonNode golden = mapper.readTree(GOLDEN.toFile());
         String mdx = golden.path("mdx").asText();
-        String expectedCellSet = golden.path("cellSet").asText();
         assertTrue(
             "golden must carry basic-select MDX",
             mdx.toLowerCase().contains("unit sales"));
 
-        long segmentFallbacksBefore =
-            CalcitePlannerAdapters.segmentLoadFallbackCount();
+        long tupleReadUnsupportedBefore =
+            CalcitePlannerAdapters.tupleReadUnsupportedCount();
 
-        // Run with the Calcite backend.
         SmokeCorpus.NamedMdx named =
             new SmokeCorpus.NamedMdx("basic-select", mdx);
-        FoodMartCapture.CapturedRun run =
+
+        try {
             FoodMartCapture.executeCold(named, null);
+            fail(
+                "expected UnsupportedTranslation under no-fallback policy"
+                + " (tuple-read translation is deferred to worktree #2)");
+        } catch (Exception e) {
+            Throwable t = e;
+            while (t != null && !(t instanceof UnsupportedTranslation)) {
+                t = t.getCause();
+            }
+            assertTrue(
+                "expected UnsupportedTranslation somewhere in the cause"
+                + " chain; actual: " + e,
+                t instanceof UnsupportedTranslation);
+        }
 
-        assertEquals(
-            "basic-select cell-set must match archived legacy golden",
-            expectedCellSet, run.cellSet);
+        long tupleReadUnsupportedAfter =
+            CalcitePlannerAdapters.tupleReadUnsupportedCount();
 
-        long segmentFallbacksAfter =
-            CalcitePlannerAdapters.segmentLoadFallbackCount();
-
-        // The hard gate for this task: segment-load translation must have
-        // succeeded every time during this query. Tuple-read fallbacks are
-        // still expected (they cover cardinality probes / member reads
-        // that land in later worktrees).
-        assertEquals(
-            "basic-select must not fall back to legacy SQL at segment-load;"
-                + " delta=" + (segmentFallbacksAfter - segmentFallbacksBefore),
-            0L, segmentFallbacksAfter - segmentFallbacksBefore);
+        // Observability: the dispatch seam must have been exercised at
+        // least once (schema load calls readMembers for default-member
+        // resolution on cube init).
+        assertTrue(
+            "tuple-read dispatch must have fired at least once; delta="
+                + (tupleReadUnsupportedAfter - tupleReadUnsupportedBefore),
+            tupleReadUnsupportedAfter - tupleReadUnsupportedBefore > 0);
     }
 }
 

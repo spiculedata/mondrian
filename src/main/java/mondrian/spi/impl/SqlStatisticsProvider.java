@@ -50,19 +50,21 @@ public class SqlStatisticsProvider implements StatisticsProvider {
     private static final ConcurrentMap<DataSource, CalciteSqlPlanner>
         PROBE_PLANNER_CACHE = new ConcurrentHashMap<>();
 
-    private static CalciteSqlPlanner plannerFor(
-        DataSource dataSource, Dialect dialect)
-    {
+    private static CalciteSqlPlanner plannerFor(DataSource dataSource) {
         CalciteSqlPlanner cached = PROBE_PLANNER_CACHE.get(dataSource);
         if (cached != null) {
             return cached;
         }
-        String product = dialect.getDatabaseProduct().name();
+        // Under backend=calcite we read the database product name straight
+        // from DatabaseMetaData via CalciteDialectMap.forDataSource. The
+        // Mondrian spi.Dialect instance is intentionally not consulted here
+        // — worktree #4 deletes those classes and the Calcite path cannot
+        // depend on them even for metadata.
         CalciteMondrianSchema schema =
             new CalciteMondrianSchema(dataSource, "mondrian");
         CalciteSqlPlanner planner =
             new CalciteSqlPlanner(
-                schema, CalciteDialectMap.forProductName(product));
+                schema, CalciteDialectMap.forDataSource(dataSource));
         CalciteSqlPlanner existing =
             PROBE_PLANNER_CACHE.putIfAbsent(dataSource, planner);
         return existing != null ? existing : planner;
@@ -162,48 +164,29 @@ public class SqlStatisticsProvider implements StatisticsProvider {
         if (sql == null) {
             return -1;
         }
-        // Task C dispatch: third SQL-origin seam. Under the Calcite backend
-        // we route cardinality probes through CalciteSqlPlanner via
-        // CalcitePlannerAdapters.fromCardinalityProbe. On
-        // UnsupportedTranslation we fall back to the legacy string so
-        // parity holds. Mirrors the SegmentLoader / SqlTupleReader wiring.
+        // Task C dispatch: third SQL-origin seam. Under backend=calcite the
+        // Calcite path owns the SQL string end-to-end. UnsupportedTranslation
+        // propagates — no fallback to the legacy string, no RuntimeException
+        // swallow. Cardinality probes are trivially translatable in all
+        // observed shapes; if a probe shape exists that the translator
+        // can't handle, that's a hard-fail bug to surface, not a silent
+        // downgrade.
         if (MondrianBackend.current().isCalcite()) {
-            try {
-                PlannerRequest req =
-                    CalcitePlannerAdapters.fromCardinalityProbe(
-                        schema, table, column);
-                CalciteSqlPlanner planner = plannerFor(dataSource, dialect);
-                String calciteSql = planner.plan(req);
-                if (Boolean.getBoolean("mondrian.calcite.trace")) {
-                    System.err.println(
-                        "[calcite-ok-probe] " + calciteSql);
-                }
-                if (LOGGER.isDebugEnabled()) {
-                    LOGGER.debug(
-                        "Calcite backend: cardinality probe translated.\n"
-                        + "  legacy: " + sql + "\n"
-                        + "  calcite: " + calciteSql);
-                }
-                sql = calciteSql;
-            } catch (UnsupportedTranslation ex) {
-                if (Boolean.getBoolean("mondrian.calcite.trace")) {
-                    System.err.println(
-                        "[calcite-unsupported-probe] " + ex.getMessage());
-                }
-                if (LOGGER.isDebugEnabled()) {
-                    LOGGER.debug(
-                        "Calcite backend: cardinality probe fell back to "
-                        + "legacy SQL: " + ex.getMessage());
-                }
-            } catch (RuntimeException ex) {
-                CalcitePlannerAdapters
-                    .recordCardinalityProbeFallback();
-                if (LOGGER.isDebugEnabled()) {
-                    LOGGER.debug(
-                        "Calcite backend: probe planner threw; falling "
-                        + "back to legacy SQL: " + ex.getMessage(), ex);
-                }
+            PlannerRequest req =
+                CalcitePlannerAdapters.fromCardinalityProbe(
+                    schema, table, column);
+            CalciteSqlPlanner planner = plannerFor(dataSource);
+            String calciteSql = planner.plan(req);
+            if (Boolean.getBoolean("mondrian.calcite.trace")) {
+                System.err.println("[calcite-ok-probe] " + calciteSql);
             }
+            if (LOGGER.isDebugEnabled()) {
+                LOGGER.debug(
+                    "Calcite backend: cardinality probe translated.\n"
+                    + "  legacy: " + sql + "\n"
+                    + "  calcite: " + calciteSql);
+            }
+            sql = calciteSql;
         }
         SqlStatement stmt =
             RolapUtil.executeQuery(

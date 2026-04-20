@@ -54,13 +54,13 @@ public class CardinalityProbeEndToEndTest {
     }
 
     @Before public void reset() {
-        CalcitePlannerAdapters.resetFallbackCount();
+        CalcitePlannerAdapters.resetUnsupportedCount();
         SqlStatisticsProvider.clearCalcitePlannerCache();
     }
 
     @After public void clearBackend() {
         System.clearProperty("mondrian.backend");
-        CalcitePlannerAdapters.resetFallbackCount();
+        CalcitePlannerAdapters.resetUnsupportedCount();
         SqlStatisticsProvider.clearCalcitePlannerCache();
     }
 
@@ -87,7 +87,7 @@ public class CardinalityProbeEndToEndTest {
 
     @Test public void qualifiedSchemaRejected() {
         long before =
-            CalcitePlannerAdapters.cardinalityProbeFallbackCount();
+            CalcitePlannerAdapters.cardinalityProbeUnsupportedCount();
         try {
             CalcitePlannerAdapters.fromCardinalityProbe(
                 "public", "product", "product_id");
@@ -100,12 +100,12 @@ public class CardinalityProbeEndToEndTest {
         }
         assertEquals(
             before + 1,
-            CalcitePlannerAdapters.cardinalityProbeFallbackCount());
+            CalcitePlannerAdapters.cardinalityProbeUnsupportedCount());
     }
 
     @Test public void nullTableRejected() {
         long before =
-            CalcitePlannerAdapters.cardinalityProbeFallbackCount();
+            CalcitePlannerAdapters.cardinalityProbeUnsupportedCount();
         try {
             CalcitePlannerAdapters.fromCardinalityProbe(
                 null, null, "product_id");
@@ -115,12 +115,12 @@ public class CardinalityProbeEndToEndTest {
         }
         assertEquals(
             before + 1,
-            CalcitePlannerAdapters.cardinalityProbeFallbackCount());
+            CalcitePlannerAdapters.cardinalityProbeUnsupportedCount());
     }
 
     @Test public void nullColumnRejected() {
         long before =
-            CalcitePlannerAdapters.cardinalityProbeFallbackCount();
+            CalcitePlannerAdapters.cardinalityProbeUnsupportedCount();
         try {
             CalcitePlannerAdapters.fromCardinalityProbe(
                 null, "product", null);
@@ -130,7 +130,7 @@ public class CardinalityProbeEndToEndTest {
         }
         assertEquals(
             before + 1,
-            CalcitePlannerAdapters.cardinalityProbeFallbackCount());
+            CalcitePlannerAdapters.cardinalityProbeUnsupportedCount());
     }
 
     @Test public void planRendersCountDistinctSqlAgainstFoodMart()
@@ -195,7 +195,7 @@ public class CardinalityProbeEndToEndTest {
         // at 0" contract called out in the task brief.
         assertEquals(
             0L,
-            CalcitePlannerAdapters.cardinalityProbeFallbackCount());
+            CalcitePlannerAdapters.cardinalityProbeUnsupportedCount());
     }
 
     @Test public void measureCtorKeepsDistinctFalseByDefault() {

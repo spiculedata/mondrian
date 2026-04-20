@@ -16,7 +16,6 @@ import mondrian.calcite.CalcitePlannerAdapters;
 import mondrian.calcite.CalciteSqlPlanner;
 import mondrian.calcite.MondrianBackend;
 import mondrian.calcite.PlannerRequest;
-import mondrian.calcite.UnsupportedTranslation;
 import mondrian.olap.MondrianException;
 import mondrian.olap.MondrianProperties;
 import mondrian.olap.Util;
@@ -87,13 +86,16 @@ public class SegmentLoader {
         if (cached != null) {
             return cached;
         }
-        String product =
-            star.getSqlQueryDialect().getDatabaseProduct().name();
+        // Under backend=calcite we deliberately avoid consulting
+        // mondrian.spi.Dialect for product-name lookup; those classes are
+        // slated for removal in worktree #4. Read the product name straight
+        // off DatabaseMetaData via CalciteDialectMap.forDataSource.
         CalciteMondrianSchema schema =
             new CalciteMondrianSchema(star.getDataSource(), "mondrian");
         CalciteSqlPlanner planner =
             new CalciteSqlPlanner(
-                schema, CalciteDialectMap.forProductName(product));
+                schema,
+                CalciteDialectMap.forDataSource(star.getDataSource()));
         CalciteSqlPlanner existing =
             CALCITE_PLANNER_CACHE.putIfAbsent(star, planner);
         return existing != null ? existing : planner;
@@ -670,55 +672,30 @@ public class SegmentLoader {
                     }
             };
 
-        // Worktree-#1 dispatch: when the calcite backend is selected,
-        // attempt to obtain the SQL string from CalciteSqlPlanner via
-        // CalcitePlannerAdapters.fromSegmentLoad. Translation coverage
-        // is incomplete; on UnsupportedTranslation we fall back to the
-        // legacy AggregationManager-built string so the harness keeps
-        // making progress. The RolapUtil.executeQuery / SqlInterceptor
-        // seam below is unchanged: both backends feed the same JDBC call.
+        // Under backend=calcite, the Calcite path owns the SQL string
+        // end-to-end. UnsupportedTranslation is a hard failure that
+        // propagates to the caller: no fallback to legacy SqlQuery,
+        // because once worktree #4 deletes those classes there is no
+        // fallback to fall back to. The RolapUtil.executeQuery /
+        // SqlInterceptor seam below is unchanged: both backends feed the
+        // same JDBC call.
         String sql = pair.left;
         if (MondrianBackend.current().isCalcite()) {
-            try {
-                PlannerRequest req =
-                    CalcitePlannerAdapters.fromSegmentLoad(
-                        groupingSetsList, compoundPredicateList);
-                CalciteSqlPlanner planner = plannerFor(star);
-                String calciteSql = planner.plan(req);
-                if (Boolean.getBoolean("mondrian.calcite.trace")) {
-                    System.err.println(
-                        "[calcite-ok] " + calciteSql);
-                }
-                if (LOGGER.isDebugEnabled()) {
-                    LOGGER.debug(
-                        "Calcite backend: segment-load translated.\n"
-                        + "  legacy: " + sql + "\n"
-                        + "  calcite: " + calciteSql);
-                }
-                sql = calciteSql;
-            } catch (UnsupportedTranslation ex) {
-                if (Boolean.getBoolean("mondrian.calcite.trace")) {
-                    System.err.println(
-                        "[calcite-unsupported] " + ex.getMessage());
-                }
-                if (LOGGER.isDebugEnabled()) {
-                    LOGGER.debug(
-                        "Calcite backend: segment-load fell back to "
-                        + "legacy SQL: " + ex.getMessage());
-                }
-            } catch (RuntimeException ex) {
-                // Planner failure must never break parity: record and fall
-                // back to the legacy SQL. This guards against Calcite-side
-                // bugs (schema reflection mismatches, etc.) while the
-                // translator is maturing.
-                CalcitePlannerAdapters.recordSegmentLoadFallback();
-                if (LOGGER.isDebugEnabled()) {
-                    LOGGER.debug(
-                        "Calcite backend: planner threw; falling back to "
-                        + "legacy SQL: " + ex.getMessage(),
-                        ex);
-                }
+            PlannerRequest req =
+                CalcitePlannerAdapters.fromSegmentLoad(
+                    groupingSetsList, compoundPredicateList);
+            CalciteSqlPlanner planner = plannerFor(star);
+            String calciteSql = planner.plan(req);
+            if (Boolean.getBoolean("mondrian.calcite.trace")) {
+                System.err.println("[calcite-ok] " + calciteSql);
             }
+            if (LOGGER.isDebugEnabled()) {
+                LOGGER.debug(
+                    "Calcite backend: segment-load translated.\n"
+                    + "  legacy: " + sql + "\n"
+                    + "  calcite: " + calciteSql);
+            }
+            sql = calciteSql;
         }
 
         try {

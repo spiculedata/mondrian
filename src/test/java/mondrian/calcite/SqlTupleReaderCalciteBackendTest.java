@@ -41,12 +41,12 @@ import static org.junit.Assert.*;
 public class SqlTupleReaderCalciteBackendTest {
 
     @Before public void resetCounter() {
-        CalcitePlannerAdapters.resetFallbackCount();
+        CalcitePlannerAdapters.resetUnsupportedCount();
     }
 
     @After public void clearBackend() {
         System.clearProperty("mondrian.backend");
-        CalcitePlannerAdapters.resetFallbackCount();
+        CalcitePlannerAdapters.resetUnsupportedCount();
     }
 
     @Test public void fromTupleReadThrowsUnsupportedTranslationForNow() {
@@ -56,14 +56,13 @@ public class SqlTupleReaderCalciteBackendTest {
         } catch (UnsupportedTranslation ex) {
             assertNotNull(ex.getMessage());
             assertTrue(
-                "message should mention fallback / tuple-read",
-                ex.getMessage().toLowerCase().contains("tuple")
-                    || ex.getMessage().toLowerCase().contains("legacy"));
+                "message should mention tuple-read",
+                ex.getMessage().toLowerCase().contains("tuple"));
         }
     }
 
-    @Test public void unsupportedFallbackCounterIncrements() {
-        long before = CalcitePlannerAdapters.unsupportedFallbackCount();
+    @Test public void unsupportedCounterIncrements() {
+        long before = CalcitePlannerAdapters.unsupportedCount();
         try {
             CalcitePlannerAdapters.fromTupleRead(new Object());
         } catch (UnsupportedTranslation ignored) {
@@ -76,7 +75,7 @@ public class SqlTupleReaderCalciteBackendTest {
         }
         assertEquals(
             before + 2,
-            CalcitePlannerAdapters.unsupportedFallbackCount());
+            CalcitePlannerAdapters.unsupportedCount());
     }
 
     @Test public void calcitePropertyFlipsCurrentBackend() {
@@ -100,7 +99,7 @@ public class SqlTupleReaderCalciteBackendTest {
         System.setProperty("mondrian.backend", "legacy");
         assertSame(MondrianBackend.LEGACY, MondrianBackend.current());
         assertEquals(
-            0L, CalcitePlannerAdapters.unsupportedFallbackCount());
+            0L, CalcitePlannerAdapters.unsupportedCount());
     }
 }
 

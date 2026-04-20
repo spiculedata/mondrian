@@ -128,3 +128,21 @@ After running the smoke + aggregate corpus (`mvn -Pcalcite-harness -Dtest='Equiv
 ### Summary
 
 Worktree #1 ships its stated promise: Calcite is the default backend, the dispatch seam is in place, the foundations (schema adapter, planner, dialect map, translation API, fallback counter, harness) are tested in isolation, and parity with legacy is preserved through the fallback. Zero corpus queries actually generate their SQL via `CalciteSqlPlanner` end-to-end. The blocker for "even one" is not implementation effort on the translator — it is a harness-mode mismatch (Gap A) compounded by `PlannerRequest` being deliberately kept narrow in worktree #1. Both are tractable in worktree #2 and the priority-ordered shopping list above is the roadmap.
+
+## Policy change: no fallback
+
+After the initial checkpoint-4 landing, the "catch `UnsupportedTranslation` and fall back to legacy `SqlQuery.toString()`" branch was removed. The rule going forward is:
+
+- **`backend=calcite`:** every SQL string on the wire is Calcite-generated. `UnsupportedTranslation` propagates to the caller — the query (and its test) fails. The Calcite path never consults `mondrian.spi.impl.*Dialect`; dialect lookup goes through `CalciteDialectMap.forDataSource(DataSource)`, which reads the database product name straight off `DatabaseMetaData` via JDBC.
+- **`backend=legacy`:** unchanged — the kill switch preserves the legacy path in its entirety.
+
+### Rationale
+
+Once worktree #4 deletes `SqlQuery`, `SqlQueryBuilder`, and `mondrian.spi.impl.*Dialect`, there is no fallback target to fall back to. Keeping the catch-and-fallback during development was masking the true coverage gap; production deployments cannot silently depend on which shapes the translator happens to cover. Making `UnsupportedTranslation` a hard failure surfaces that gap as an enumerable list of test failures (the worktree-#2 shopping list) rather than as subtly-different SQL behaviour at runtime.
+
+### Consequences
+
+- `unsupportedFallbackCount()` / `record*Fallback()` are renamed to `unsupportedCount()` / incremented-at-throw-site — they are pure observability now, not a fallback signal.
+- Under `backend=calcite`, running the smoke + aggregate corpus is mostly red. Only the two translatable shapes today (`basic-select`'s segment-load, the cardinality probe) survive. Everything else throws.
+- Legacy harness (`-Dmondrian.backend=legacy`) stays 34/34 — that is the only absolute gate.
+- Full post-change pass/fail distribution and the bucketed worktree-#2 shopping list live in [`2026-04-19-calcite-backend-foundations-checkpoint4b.md`](2026-04-19-calcite-backend-foundations-checkpoint4b.md).

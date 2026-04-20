@@ -12,6 +12,11 @@ package mondrian.calcite;
 import org.apache.calcite.sql.SqlDialect;
 import org.apache.calcite.sql.dialect.HsqldbSqlDialect;
 
+import java.sql.Connection;
+import java.sql.DatabaseMetaData;
+import java.sql.SQLException;
+import javax.sql.DataSource;
+
 /**
  * Maps Mondrian-reported JDBC database product names to Calcite
  * {@link SqlDialect} instances configured for SQL emission compatible with
@@ -26,6 +31,30 @@ import org.apache.calcite.sql.dialect.HsqldbSqlDialect;
  */
 public final class CalciteDialectMap {
     private CalciteDialectMap() {}
+
+    /**
+     * Resolves a Calcite {@link SqlDialect} for the given JDBC
+     * {@link DataSource} by reading the database product name directly from
+     * {@link DatabaseMetaData}. Production call sites under
+     * {@code backend=calcite} must use this entry-point; we deliberately
+     * avoid any dependency on {@code mondrian.spi.impl.*Dialect} classes so
+     * that once worktree #4 removes them the Calcite path keeps compiling
+     * and running end-to-end.
+     */
+    public static SqlDialect forDataSource(DataSource ds) {
+        if (ds == null) {
+            throw new IllegalArgumentException("null DataSource");
+        }
+        try (Connection conn = ds.getConnection()) {
+            DatabaseMetaData md = conn.getMetaData();
+            String product = md.getDatabaseProductName();
+            return forProductName(product);
+        } catch (SQLException e) {
+            throw new RuntimeException(
+                "CalciteDialectMap.forDataSource: failed to read "
+                + "DatabaseMetaData.getDatabaseProductName()", e);
+        }
+    }
 
     public static SqlDialect forProductName(String product) {
         if (product == null) {
