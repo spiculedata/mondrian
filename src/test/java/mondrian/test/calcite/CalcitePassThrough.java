@@ -16,8 +16,10 @@ import org.apache.calcite.avatica.util.Casing;
 import org.apache.calcite.avatica.util.Quoting;
 import org.apache.calcite.sql.SqlDialect;
 import org.apache.calcite.sql.SqlNode;
+import org.apache.calcite.sql.SqlWriterConfig;
 import org.apache.calcite.sql.dialect.HsqldbSqlDialect;
 import org.apache.calcite.sql.parser.SqlParser;
+import org.apache.calcite.sql.pretty.SqlPrettyWriter;
 import org.apache.calcite.sql.validate.SqlConformanceEnum;
 
 import java.util.logging.Level;
@@ -59,7 +61,10 @@ public class CalcitePassThrough implements SqlInterceptor {
         try {
             SqlParser.Config cfg = parserConfig(dialect);
             SqlNode node = SqlParser.create(sql, cfg).parseStmt();
-            return node.toSqlString(mapDialect(dialect)).getSql();
+            SqlDialect out = mapDialect(dialect);
+            return node.toSqlString(c ->
+                c.withDialect(out).withQuoteAllIdentifiers(true))
+                .getSql();
         } catch (Exception e) {
             LOG.log(Level.WARNING,
                 "CalcitePassThrough parse failed; returning original SQL."
@@ -93,11 +98,18 @@ public class CalcitePassThrough implements SqlInterceptor {
 
     /**
      * Maps a Mondrian dialect to a Calcite {@link SqlDialect} for re-emission.
-     * Defaults to {@link HsqldbSqlDialect#DEFAULT} which matches the FoodMart
-     * test fixture. Null dialect defaults to HSQLDB.
+     * Defaults to an HSQLDB dialect that uses double-quoted identifiers —
+     * matching what Mondrian's {@code HsqldbDialect} emits against the
+     * FoodMart fixture. Calcite's stock {@link HsqldbSqlDialect#DEFAULT} has
+     * an empty {@code identifierQuoteString}, which causes it to drop all
+     * identifier quotes on re-emission, which then breaks HSQLDB 1.8 because
+     * it case-folds unquoted identifiers to upper-case and FoodMart's tables
+     * are lower-case. Null dialect defaults to HSQLDB.
      */
     private SqlDialect mapDialect(Dialect d) {
-        return HsqldbSqlDialect.DEFAULT;
+        SqlDialect.Context ctx = HsqldbSqlDialect.DEFAULT_CONTEXT
+            .withIdentifierQuoteString("\"");
+        return new HsqldbSqlDialect(ctx);
     }
 
     private String preview(String sql) {
