@@ -13,6 +13,7 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -111,7 +112,47 @@ public final class SqlCapture implements DataSource {
                 String sql = (String) args[0];
                 return wrapPreparedStatement((PreparedStatement) result, sql);
             }
+            // All createStatement overloads return Statement; wrap them all.
+            if ("createStatement".equals(name) && result instanceof Statement) {
+                return wrapStatement((Statement) result);
+            }
             return result;
+        }
+    }
+
+    private Statement wrapStatement(Statement s) {
+        return (Statement) Proxy.newProxyInstance(
+            Statement.class.getClassLoader(),
+            new Class<?>[]{Statement.class},
+            new StatementHandler(s));
+    }
+
+    private final class StatementHandler implements InvocationHandler {
+        private final Statement target;
+
+        StatementHandler(Statement target) { this.target = target; }
+
+        @Override
+        public Object invoke(Object proxy, Method method, Object[] args)
+            throws Throwable
+        {
+            String name = method.getName();
+            // Statement#executeQuery(String) and Statement#execute(String)
+            // both return result-sets that callers may iterate via
+            // #getResultSet(); RolapUtil uses executeQuery.
+            if ("executeQuery".equals(name)
+                && args != null && args.length == 1
+                && args[0] instanceof String)
+            {
+                String sql = (String) args[0];
+                ResultSet rs = (ResultSet) method.invoke(target, args);
+                try {
+                    return captureAndReplay(sql, rs);
+                } finally {
+                    try { rs.close(); } catch (SQLException ignored) { }
+                }
+            }
+            return method.invoke(target, args);
         }
     }
 
