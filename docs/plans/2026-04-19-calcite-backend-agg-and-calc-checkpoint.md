@@ -481,3 +481,42 @@ End-to-end execution under `mondrian.backend=calcite` of `[Measures].[Profit] as
 
 Initial implementation used only a ThreadLocal on `CalcPushdownRegistry`. Segment-load translation runs on the `SegmentCacheManager$ACTOR` or a `RolapResultShepherd` worker, so the submitter-thread ThreadLocal was unreachable — `calcPushedCount()` stayed positive but `fromSegmentLoad` saw an empty registry. Fixed by keying the registry on `mondrian.server.Execution` (reachable on both sides via `Locus.peek().execution`). The ThreadLocal remains as a secondary surface so unit tests that poke the registry directly via `activate(entries)` continue to work.
 
+
+## Task Z — Postgres harness backend
+
+### Scope
+
+Opt-in Postgres backend for the Calcite equivalence harness. Orthogonal to the legacy-vs-Calcite `MondrianBackend` switch — `HarnessBackend` selects WHICH database (HSQLDB | Postgres); `MondrianBackend` selects WHICH SQL emitter (legacy | calcite). Default remains HSQLDB so `mvn test` behaviour is unchanged.
+
+### Files changed / added
+
+- `src/main/java/mondrian/calcite/CalciteDialectMap.java` — added `"postgres"` product-name branch, returning stock `PostgresqlSqlDialect.DEFAULT` (no quoting subclass needed — Calcite's Postgres dialect already uses `"` as the identifier quote).
+- `src/test/java/mondrian/calcite/CalciteDialectMapTest.java` — +5 cases: Postgres product string, lowercase variant, Postgres DataSource round-trip via mocked `DatabaseMetaData`, HSQLDB DataSource round-trip (parity), and a direct `quoteIdentifier` assertion confirming `"sales_fact_1997"` emission.
+- `src/test/java/mondrian/test/calcite/HarnessBackend.java` — NEW. Enum `HSQLDB | POSTGRES`, `current()` reads system property `calcite.harness.backend` then env `CALCITE_HARNESS_BACKEND`, default HSQLDB.
+- `src/test/java/mondrian/test/calcite/PostgresFoodMartDataSource.java` — NEW. Reads `CALCITE_HARNESS_POSTGRES_URL/USER/PASSWORD`. Prefers reflectively-loaded `org.postgresql.ds.PGSimpleDataSource`; falls back to a `DriverManager`-backed shim `DataSource`.
+- `src/test/java/mondrian/test/calcite/FoodMartCapture.java` — `buildUnderlyingDataSource()` now switches on `HarnessBackend.current()`. HSQLDB path is byte-identical to prior behaviour.
+- `src/test/java/mondrian/calcite/PostgresConnectivityTest.java` — NEW. Skips via `Assume.assumeTrue` when `CALCITE_HARNESS_BACKEND != POSTGRES`. When enabled, runs `SELECT version()`, asserts Postgres product name, and asserts `CalciteDialectMap.forDataSource(ds) instanceof PostgresqlSqlDialect`.
+- `pom.xml` — `org.postgresql:postgresql:42.7.4` at **test** scope.
+
+### Verification
+
+- **HSQLDB default (no env var)** — full Calcite harness green, `Tests run: 69, Failures: 0, Errors: 0, Skipped: 0`. Covers Equivalence{Smoke,Aggregate,Calc}Test (41/41 queries) plus all supporting harness tests.
+- **PostgresConnectivityTest skip** — `mvn -Dtest=PostgresConnectivityTest test` → 2/2 skipped. Default `mvn test` ignores Postgres entirely.
+- **Postgres connectivity** — `CALCITE_HARNESS_BACKEND=POSTGRES mvn -Dtest=PostgresConnectivityTest test` → 2/2 green against local Postgres on `jdbc:postgresql://localhost:5432/foodmart_calcite`, peer-auth as `tombarber`, empty password.
+- **Dialect map unit tests** — `CalciteDialectMapTest` 9/9 green (4 existing + 5 new).
+
+### Dialect-mapping notes
+
+No surprises from Calcite 1.41's `PostgresqlSqlDialect.DEFAULT`:
+
+- Identifier quote is `"`, same as the HSQLDB quoting subclass, so emitted SQL shape `"sales_fact_1997"."unit_sales"` matches existing HSQLDB goldens in the *identifier-quoting* dimension.
+- No subclass override was required; we can keep the quoting subclass workaround strictly scoped to HSQLDB.
+- Task AA will load FoodMart into Postgres. Until then the full harness against Postgres will fail on missing tables — expected.
+
+### Guardrails held
+
+- Legacy 44/44 on HSQLDB — unchanged default path.
+- Calcite 44/44 on HSQLDB — unchanged default path.
+- No edits to `SqlQuery` / `*Dialect` / `aggmatcher/`.
+- HSQLDB quoting subclass preserved.
+- Postgres driver scoped to `test` only.

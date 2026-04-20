@@ -11,6 +11,7 @@ package mondrian.calcite;
 
 import org.apache.calcite.sql.SqlDialect;
 import org.apache.calcite.sql.dialect.HsqldbSqlDialect;
+import org.apache.calcite.sql.dialect.PostgresqlSqlDialect;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
@@ -64,9 +65,12 @@ public final class CalciteDialectMap {
         if (p.contains("hsql")) {
             return QUOTING_HSQLDB;
         }
+        if (p.contains("postgres")) {
+            return PostgresqlSqlDialect.DEFAULT;
+        }
         throw new IllegalArgumentException(
             "No Calcite SqlDialect mapping for JDBC product '" + product
-            + "'. Worktree #1 supports HSQLDB only; extend "
+            + "'. Supported: HSQLDB, PostgreSQL. Extend "
             + "CalciteDialectMap to add more.");
     }
 

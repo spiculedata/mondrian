@@ -146,22 +146,29 @@ final class FoodMartCapture {
     }
 
     static DataSource buildUnderlyingDataSource() {
-        String jdbcUrl =
-            MondrianProperties.instance().FoodmartJdbcURL.get();
-        String user =
-            MondrianProperties.instance().TestJdbcUser.get();
-        String password =
-            MondrianProperties.instance().TestJdbcPassword.get();
-        org.hsqldb.jdbc.jdbcDataSource ds =
-            new org.hsqldb.jdbc.jdbcDataSource();
-        ds.setDatabase(jdbcUrl);
-        if (user != null) {
-            ds.setUser(user);
+        HarnessBackend backend = HarnessBackend.current();
+        switch (backend) {
+        case POSTGRES:
+            return PostgresFoodMartDataSource.create();
+        case HSQLDB:
+        default:
+            String jdbcUrl =
+                MondrianProperties.instance().FoodmartJdbcURL.get();
+            String user =
+                MondrianProperties.instance().TestJdbcUser.get();
+            String password =
+                MondrianProperties.instance().TestJdbcPassword.get();
+            org.hsqldb.jdbc.jdbcDataSource ds =
+                new org.hsqldb.jdbc.jdbcDataSource();
+            ds.setDatabase(jdbcUrl);
+            if (user != null) {
+                ds.setUser(user);
+            }
+            if (password != null) {
+                ds.setPassword(password);
+            }
+            return ds;
         }
-        if (password != null) {
-            ds.setPassword(password);
-        }
-        return ds;
     }
 }
 

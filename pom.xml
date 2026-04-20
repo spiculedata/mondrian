@@ -100,6 +100,15 @@
       <artifactId>calcite-linq4j</artifactId>
       <version>1.41.0</version>
     </dependency>
+    <!-- Postgres JDBC driver: test-scope only, used by the Calcite harness
+         when CALCITE_HARNESS_BACKEND=POSTGRES. Default harness backend is
+         HSQLDB and this driver is not loaded. See Task Z. -->
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <version>42.7.4</version>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <build>
