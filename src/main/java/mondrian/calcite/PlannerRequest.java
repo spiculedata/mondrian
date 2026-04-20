@@ -165,6 +165,51 @@ public final class PlannerRequest {
         }
     }
 
+    /**
+     * A post-aggregate computed measure: an arithmetic expression over
+     * already-aggregated base measures. Rendered by
+     * {@link CalciteSqlPlanner} as an extra projection on top of the
+     * aggregate, built by {@link ArithmeticCalcTranslator}.
+     *
+     * <p>The {@link #expression} is an opaque MDX {@code Exp} tree; the
+     * planner owns a translator and the {@link #baseMeasureAliases}
+     * mapping resolves a calc's base-measure references to the
+     * aggregate row's columns.
+     *
+     * <p>Added in Task T (arithmetic calc-member pushdown).
+     */
+    public static final class ComputedMeasure {
+        public final String alias;
+        public final Object expression; // mondrian.olap.Exp, kept Object
+                                        // to avoid an import-cycle burden
+                                        // on callers that don't touch
+                                        // MDX directly.
+        /** Map from mondrian.olap.Member (base measure) → alias of the
+         *  Measure entry in {@link PlannerRequest#measures}. */
+        public final java.util.Map<Object, String> baseMeasureAliases;
+
+        public ComputedMeasure(
+            String alias, Object expression,
+            java.util.Map<Object, String> baseMeasureAliases)
+        {
+            if (alias == null || alias.isEmpty()) {
+                throw new IllegalArgumentException("alias required");
+            }
+            if (expression == null) {
+                throw new IllegalArgumentException("expression required");
+            }
+            if (baseMeasureAliases == null) {
+                throw new IllegalArgumentException(
+                    "baseMeasureAliases required");
+            }
+            this.alias = alias;
+            this.expression = expression;
+            this.baseMeasureAliases =
+                java.util.Collections.unmodifiableMap(
+                    new java.util.LinkedHashMap<>(baseMeasureAliases));
+        }
+    }
+
     public static final class OrderBy {
         public final Column column;
         public final Order direction;
@@ -232,6 +277,7 @@ public final class PlannerRequest {
     public final List<Filter> filters;
     public final List<TupleFilter> tupleFilters;
     public final List<Having> havings;
+    public final List<ComputedMeasure> computedMeasures;
     public final List<OrderBy> orderBy;
     /** Row-level DISTINCT on projections. Only valid when not aggregating.
      *  Added for tuple-read / level-member dispatch (Task E). */
@@ -250,6 +296,7 @@ public final class PlannerRequest {
         this.filters = List.copyOf(b.filters);
         this.tupleFilters = List.copyOf(b.tupleFilters);
         this.havings = List.copyOf(b.havings);
+        this.computedMeasures = List.copyOf(b.computedMeasures);
         this.orderBy = List.copyOf(b.orderBy);
         this.distinct = b.distinct;
         this.universalFalse = b.universalFalse;
@@ -279,6 +326,8 @@ public final class PlannerRequest {
         private final List<Filter> filters = new ArrayList<>();
         private final List<TupleFilter> tupleFilters = new ArrayList<>();
         private final List<Having> havings = new ArrayList<>();
+        private final List<ComputedMeasure> computedMeasures =
+            new ArrayList<>();
         private final List<OrderBy> orderBy = new ArrayList<>();
         private boolean distinct;
         private boolean universalFalse;
@@ -307,6 +356,13 @@ public final class PlannerRequest {
                 throw new IllegalArgumentException("having is null");
             }
             havings.add(h);
+            return this;
+        }
+        public Builder addComputedMeasure(ComputedMeasure cm) {
+            if (cm == null) {
+                throw new IllegalArgumentException("computedMeasure is null");
+            }
+            computedMeasures.add(cm);
             return this;
         }
         public Builder addOrderBy(OrderBy o) { orderBy.add(o); return this; }

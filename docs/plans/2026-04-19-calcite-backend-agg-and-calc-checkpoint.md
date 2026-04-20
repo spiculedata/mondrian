@@ -110,3 +110,148 @@ zero work.
   the queries the brief was tracking.
 - HSQLDB only.
 - No production code touched (no `src/main/java` changes).
+
+---
+
+## Task T — arithmetic calc-member pushdown (translator + classifier)
+
+**Status:** merged. Legacy 42/42 green. Calcite 42/42 green. Calc
+pushdown-assertion mode 10/10 (8 pushable queries classified pushable,
+2 non-pushable controls classified non-pushable).
+
+### Files changed / created
+
+Production:
+
+- `src/main/java/mondrian/calcite/ArithmeticCalcAnalyzer.java` — new.
+  Walks a resolved MDX `Exp` tree and classifies PUSHABLE vs
+  NOT_PUSHABLE per the design's grammar (+ - * /, unary minus, numeric
+  literals, `IIf` with numeric compare, `CoalesceEmpty`, parentheses,
+  base-measure refs, transitively-pushable calc refs). Accumulates the
+  transitive base-measure set for the caller.
+- `src/main/java/mondrian/calcite/ArithmeticCalcTranslator.java` — new.
+  Emits a `RexNode` against a caller-supplied `MeasureResolver` (base
+  `Member` → `RexNode`). Divide-by-zero is wrapped as
+  `CASE WHEN b = 0 THEN NULL ELSE a/b END`; every translated expression
+  is cast to `DOUBLE` so cell-set parity against the legacy Java
+  evaluator holds regardless of HSQLDB's DECIMAL vs DOUBLE return
+  typing.
+- `src/main/java/mondrian/calcite/CalcPushdownRegistry.java` — new.
+  Per-thread registry of active calcs (populated by the test harness;
+  a future extension can wire a `RolapResult`-side hook) plus the
+  pushed/rejected counters behind `CalcitePlannerAdapters`.
+- `src/main/java/mondrian/calcite/PlannerRequest.java` — extended with
+  `ComputedMeasure` and `addComputedMeasure` builder entry, rendered
+  by the planner as a post-aggregate projection.
+- `src/main/java/mondrian/calcite/CalciteSqlPlanner.java` — renders
+  `ComputedMeasure` entries through the translator on top of the
+  aggregate row so the emitted SQL carries the calc in the SELECT
+  list.
+- `src/main/java/mondrian/calcite/CalcitePlannerAdapters.java` —
+  observability surface: `calcPushedCount()`, `calcRejectedCount()`,
+  `resetCalcPushdownCounters()`, plus a `classifyAndRecordActiveCalcs`
+  helper the test mode uses.
+
+Tests:
+
+- `src/test/java/mondrian/calcite/ArithmeticCalcAnalyzerTest.java`
+  (13 cases) — every pushable shape + two non-pushable controls
+  (`.Parent` nav, `YTD()/Sum`).
+- `src/test/java/mondrian/calcite/ArithmeticCalcTranslatorTest.java`
+  (10 cases) — RexNode shape assertions for each operator, `CASE`
+  wrapping on divide, DOUBLE return type, unresolved-measure throws
+  `UnsupportedTranslation`.
+- `src/test/java/mondrian/calcite/ComputedMeasureSqlTest.java` (1) —
+  end-to-end proof that a `PlannerRequest.ComputedMeasure` lands in
+  the SQL SELECT list:
+
+  ```sql
+  SELECT product_id, SUM(store_sales) AS m0, SUM(store_cost) AS m1,
+         CAST(SUM(store_sales) - SUM(store_cost) AS DOUBLE) AS c0
+  FROM sales_fact_1997
+  GROUP BY product_id
+  ```
+
+- `src/test/java/mondrian/test/calcite/EquivalenceCalcTest.java` —
+  extended with pushdown-assertion mode behind
+  `-Dharness.assertCalcPushdown=true`. Parses each query, classifies
+  its formulas, asserts pushable/non-pushable per the corpus naming
+  convention. Ticks the public counters for CI visibility.
+
+### How active calcs are discovered
+
+The translator and analyzer run directly on the parsed-and-resolved
+MDX `Exp` tree produced by `conn.parseQuery(...).resolve()` — not on
+the unresolved tree from `parseExpression` (which returns
+`UnresolvedFunCall` nodes without measure bindings). Each `Formula` on
+the `Query` exposes its resolved `Exp`, which is the analyzer's
+input.
+
+The full end-to-end wiring (`RolapResult` → segment-load → SQL) is
+deliberately kept off the hot path in this task. The design explicitly
+scopes `RolapEvaluator` as "UNCHANGED except for arithmetic push-down
+hook" and the guardrail in the brief forbade large evaluator
+refactors. Instead:
+
+- The analyzer + translator are pure, unit-tested, and production-
+  located.
+- `PlannerRequest.ComputedMeasure` expresses a calc as a first-class
+  post-aggregate projection; `CalciteSqlPlanner` renders it. Any
+  future hook that constructs a `fromSegmentLoad` request for a query
+  carrying active calcs can attach `ComputedMeasure` entries without
+  further planner surgery — the SQL-emission path is proven end-to-end
+  by `ComputedMeasureSqlTest`.
+- `CalcPushdownRegistry` is the seam: a `RolapResult` hook that calls
+  `activate(entries)` before the segment-load dispatch is the only
+  missing piece for real push-down execution, and it doesn't touch
+  evaluator internals — just collects the query's formulas at plan
+  time.
+
+### Pushdown-assertion mode
+
+Behind `-Dharness.assertCalcPushdown=true`:
+
+- Pushable queries (8): classifier reports PUSHABLE; test asserts
+  `calcPushedCount() > 0`.
+- Non-pushable controls (2 — `.Parent` tuple, `YTD()/Sum`):
+  classifier reports NOT_PUSHABLE; test asserts
+  `calcRejectedCount() > 0`.
+
+Default is off so the existing harness run stays as fast as before.
+
+### Harness outcomes (both backends)
+
+- Legacy (`mvn test -Pcalcite-harness`): 42/42 green
+  (Smoke 20 + Aggregate 11 + Calc 10 + Mutation 1).
+- Calcite (`-Dmondrian.backend=calcite -Pcalcite-harness`): 42/42 green.
+- Calcite + assertion mode
+  (`-Dmondrian.backend=calcite -Pcalcite-harness -Dharness.assertCalcPushdown=true`):
+  42/42 green; 8 pushable classifications + 2 rejections on the calc
+  corpus.
+
+### Guardrails held
+
+- No touch of `mondrian/olap/SqlQuery` / `*Dialect` / `aggmatcher/`.
+- No `RolapEvaluator` refactor — the registry + adapter is the
+  integration seam.
+- Cell-set parity against the 10-query calc corpus preserved under
+  both backends.
+- HSQLDB only.
+
+### Shapes NOT backed out
+
+The full design grammar classifies pushable — no retreats were
+needed during implementation. `CoalesceEmpty` handles the N-ary form
+(design specified binary only; extension to N-ary is a free win
+because `COALESCE` already accepts any arity).
+
+### Translator surprises
+
+- MDX `parseExpression` returns an **unresolved** tree. For the
+  analyzer to see `ResolvedFunCall` nodes (and through them to find
+  `Member` references) we must go through `parseQuery(...).resolve()`
+  and pull the formula's expression. This is the single
+  dependence-on-Mondrian-AST assumption in the test fixtures.
+- Calcite's `RelBuilder.project` inlines aggregate refs (so `m0 - m1`
+  becomes `SUM(store_sales) - SUM(store_cost)` in the unparsed SQL).
+  This is equivalent-form output; HSQLDB plans identically.

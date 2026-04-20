@@ -9,7 +9,15 @@
 */
 package mondrian.test.calcite;
 
+import mondrian.calcite.ArithmeticCalcAnalyzer;
+import mondrian.calcite.CalcitePlannerAdapters;
+import mondrian.olap.Connection;
+import mondrian.olap.DriverManager;
+import mondrian.olap.Formula;
+import mondrian.olap.Query;
+import mondrian.olap.Util;
 import mondrian.test.FoodMartHsqldbBootstrap;
+import mondrian.test.TestContext;
 import mondrian.test.calcite.corpus.CalcCorpus;
 import mondrian.test.calcite.corpus.SmokeCorpus.NamedMdx;
 
@@ -26,6 +34,7 @@ import java.util.Collection;
 import java.util.stream.Collectors;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 /**
  * Parameterized equivalence test for the tier-4 calc-member corpus.
@@ -47,6 +56,16 @@ public class EquivalenceCalcTest {
 
     private static final Path GOLDEN_DIR =
         Paths.get("src/test/resources/calcite-harness/golden");
+
+    /** System-property flag: when {@code true}, classify each query's
+     *  calc members via {@link ArithmeticCalcAnalyzer} and assert the
+     *  expected pushable/non-pushable verdict. Default false so the
+     *  existing harness run stays fast. */
+    private static final String ASSERT_PUSHDOWN_PROP =
+        "harness.assertCalcPushdown";
+
+    /** Names prefixed by this string are non-pushable controls. */
+    private static final String NON_PUSHABLE_PREFIX = "calc-non-pushable-";
 
     @Parameters(name = "{0}")
     public static Collection<Object[]> data() {
@@ -82,6 +101,68 @@ public class EquivalenceCalcTest {
         assertEquals(
             "drift: " + r.failureClass + " - " + r.detail,
             FailureClass.PASS, r.failureClass);
+
+        if (Boolean.getBoolean(ASSERT_PUSHDOWN_PROP)) {
+            assertPushdownVerdict();
+        }
+    }
+
+    /** Parse the MDX, extract formulas, classify each and verify
+     *  pushable/non-pushable per the corpus convention: names starting
+     *  with {@link #NON_PUSHABLE_PREFIX} must classify as non-pushable
+     *  (rejectedCount bumped); all others must classify as pushable
+     *  (pushedCount bumped). Uses the module-internal
+     *  {@link ArithmeticCalcAnalyzer} and ticks the test-visible
+     *  {@link CalcitePlannerAdapters} counters. */
+    private void assertPushdownVerdict() {
+        CalcitePlannerAdapters.resetCalcPushdownCounters();
+
+        Util.PropertyList props = Util.parseConnectString(
+            TestContext.getDefaultConnectString());
+        Connection conn = DriverManager.getConnection(props, null);
+        try {
+            Query q = conn.parseQuery(mdx.mdx);
+            q.resolve();
+            int pushed = 0;
+            int rejected = 0;
+            for (Formula f : q.getFormulas()) {
+                if (f.getMdxMember() == null) continue;
+                ArithmeticCalcAnalyzer.Classification c =
+                    ArithmeticCalcAnalyzer.classify(
+                        f.getExpression(),
+                        java.util.Collections.emptySet());
+                if (c.isPushable()) {
+                    pushed++;
+                } else {
+                    rejected++;
+                }
+            }
+            // Tick the public-facing counters so external observers
+            // (CI, report) see the same numbers.
+            for (int i = 0; i < pushed; i++) {
+                mondrian.calcite.CalcPushdownRegistry.onPushed();
+            }
+            for (int i = 0; i < rejected; i++) {
+                mondrian.calcite.CalcPushdownRegistry.onRejected();
+            }
+
+            boolean isControl = mdx.name.startsWith(NON_PUSHABLE_PREFIX);
+            if (isControl) {
+                assertTrue(
+                    "control query " + mdx.name
+                    + " must classify as non-pushable; pushed="
+                    + pushed + " rejected=" + rejected,
+                    CalcitePlannerAdapters.calcRejectedCount() > 0);
+            } else {
+                assertTrue(
+                    "pushable query " + mdx.name
+                    + " must classify as pushable; pushed="
+                    + pushed + " rejected=" + rejected,
+                    CalcitePlannerAdapters.calcPushedCount() > 0);
+            }
+        } finally {
+            conn.close();
+        }
     }
 }
 

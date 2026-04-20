@@ -19,8 +19,13 @@ import org.apache.calcite.tools.FrameworkConfig;
 import org.apache.calcite.tools.Frameworks;
 import org.apache.calcite.tools.RelBuilder;
 
+import mondrian.olap.Exp;
+import mondrian.olap.Member;
+
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Translates a {@link PlannerRequest} into a dialect-specific SQL string by
@@ -166,6 +171,23 @@ public final class CalciteSqlPlanner {
             for (PlannerRequest.Measure m : req.measures) {
                 restored.add(b.field(m.alias));
                 restoredAliases.add(m.alias);
+            }
+            // Append pushed-calc projections as extra columns. They
+            // reference the base-measure aliases (also in `restored`)
+            // via the ComputedMeasure's baseMeasureAliases map.
+            for (PlannerRequest.ComputedMeasure cm : req.computedMeasures) {
+                Map<Member, RexNode> refs = new HashMap<>();
+                for (Map.Entry<Object, String> e
+                    : cm.baseMeasureAliases.entrySet())
+                {
+                    refs.put((Member) e.getKey(), b.field(e.getValue()));
+                }
+                ArithmeticCalcTranslator tx =
+                    new ArithmeticCalcTranslator(
+                        b.getRexBuilder(),
+                        ArithmeticCalcTranslator.mapResolver(refs));
+                restored.add(tx.translate((Exp) cm.expression));
+                restoredAliases.add(cm.alias);
             }
             b.project(restored, restoredAliases, true);
         } else {

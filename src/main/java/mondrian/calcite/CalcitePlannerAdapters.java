@@ -2424,6 +2424,56 @@ public final class CalcitePlannerAdapters {
         return UNSUPPORTED_COUNT.get();
     }
 
+    /** Calc-pushdown counter: incremented when an arithmetic calc was
+     *  successfully classified as pushable by the translator path
+     *  (Task T). */
+    public static long calcPushedCount() {
+        return CalcPushdownRegistry.pushedCount();
+    }
+
+    /** Calc-pushdown counter: incremented when an arithmetic calc was
+     *  rejected as non-pushable by {@link ArithmeticCalcAnalyzer}
+     *  (Task T). */
+    public static long calcRejectedCount() {
+        return CalcPushdownRegistry.rejectedCount();
+    }
+
+    /** Reset calc-pushdown counters (test-only). */
+    public static void resetCalcPushdownCounters() {
+        CalcPushdownRegistry.resetCounters();
+    }
+
+    /**
+     * Classify the currently-registered calcs (via
+     * {@link CalcPushdownRegistry#activate}) and tick the pushed/
+     * rejected counters. Pure observability; no side-effect on segment-
+     * load SQL. Returns the number of calcs that classified as pushable.
+     *
+     * <p>Task T uses this from the pushdown-assertion harness mode.
+     * A future extension can plumb the pushable set through
+     * {@link PlannerRequest.ComputedMeasure} into an actual segment-load
+     * translation; today we leave the evaluator path unchanged to keep
+     * cell-set parity and avoid an invasive RolapEvaluator refactor.
+     */
+    public static int classifyAndRecordActiveCalcs() {
+        int pushed = 0;
+        for (CalcPushdownRegistry.Entry e
+            : CalcPushdownRegistry.active())
+        {
+            ArithmeticCalcAnalyzer.Classification cls =
+                ArithmeticCalcAnalyzer.classify(
+                    (mondrian.olap.Exp) e.expression,
+                    java.util.Collections.<Member>emptySet());
+            if (cls.isPushable()) {
+                CalcPushdownRegistry.onPushed();
+                pushed++;
+            } else {
+                CalcPushdownRegistry.onRejected();
+            }
+        }
+        return pushed;
+    }
+
     /** Reset the unsupported counters (test-only). */
     public static void resetUnsupportedCount() {
         UNSUPPORTED_COUNT.set(0L);
