@@ -31,8 +31,22 @@ import java.util.Optional;
  * <p>Gates, in order:
  * <ol>
  *   <li><b>LEGACY_DRIFT:</b> classic Mondrian (no interceptor) produces a
- *       cell-set + per-execution SQL/checksum sequence that must match the
- *       recorded golden under {@code goldenDir}.</li>
+ *       cell-set + per-execution rowCount/checksum sequence that must match
+ *       the recorded golden under {@code goldenDir}. Hard gate — always
+ *       fires on mismatch.</li>
+ *   <li><b>SQL_DRIFT:</b> cell-set / rowCount / checksum all match the
+ *       golden but the SQL string emitted for one of the executions differs.
+ *       Soft gate — governed by {@code -Dharness.sqlCompare=MODE}:
+ *       <ul>
+ *         <li>{@code strict}   — SQL mismatch fails the test (legacy
+ *             behaviour, kept for regression on legacy backend).</li>
+ *         <li>{@code advisory} — <b>default.</b> SQL mismatch is surfaced
+ *             via {@link HarnessReporter} but the test still passes. Enables
+ *             Calcite's ANSI-join SQL to be validated against comma-join
+ *             legacy goldens on cell-set parity alone.</li>
+ *         <li>{@code off}      — SQL string is not compared at all.</li>
+ *       </ul>
+ *   </li>
  *   <li><b>CELL_SET_DRIFT:</b> with the interceptor installed, the MDX cell
  *       set must still equal Run A's.</li>
  *   <li><b>SQL_ROWSET_DRIFT:</b> pairing captured SQL executions by seq,
@@ -43,13 +57,50 @@ import java.util.Optional;
  * system property — deliberately the production wiring — and restores the
  * prior value in a {@code finally} block.
  *
- * <p>A fourth gate, {@link FailureClass#PLAN_DRIFT}, is scaffolded via
+ * <p>A fifth gate, {@link FailureClass#PLAN_DRIFT}, is scaffolded via
  * {@link #comparePlanSnapshot(String, String, Path)} but not yet wired into
  * the pipeline — see TODO below.
  */
 public final class EquivalenceHarness {
 
     public static final String SYS_PROP = FoodMartCapture.INTERCEPTOR_SYS_PROP;
+
+    /**
+     * System-property key controlling the hardness of the SQL-string
+     * comparison in {@link #compareAgainstGolden}. See the class-level
+     * javadoc for mode semantics.
+     */
+    public static final String SQL_COMPARE_SYS_PROP = "harness.sqlCompare";
+
+    /** See {@link EquivalenceHarness} class-level javadoc. */
+    public enum SqlCompareMode {
+        /** SQL mismatch tripped as a hard failure (legacy behaviour). */
+        STRICT,
+        /** SQL mismatch recorded via HarnessReporter but test still passes. */
+        ADVISORY,
+        /** SQL string is not compared. */
+        OFF
+    }
+
+    /**
+     * Reads {@link #SQL_COMPARE_SYS_PROP}; defaults to {@link SqlCompareMode#ADVISORY}.
+     * Unknown values fall back to {@code ADVISORY} — conservative for the
+     * rewrite transition, where the worst outcome is a drift going unlogged.
+     */
+    public static SqlCompareMode sqlCompareMode() {
+        String raw = System.getProperty(SQL_COMPARE_SYS_PROP);
+        if (raw == null || raw.isEmpty()) {
+            return SqlCompareMode.ADVISORY;
+        }
+        String v = raw.trim().toLowerCase();
+        if ("strict".equals(v)) {
+            return SqlCompareMode.STRICT;
+        }
+        if ("off".equals(v) || "none".equals(v) || "false".equals(v)) {
+            return SqlCompareMode.OFF;
+        }
+        return SqlCompareMode.ADVISORY;
+    }
 
     /**
      * Default location of plan-snapshot goldens. The directory exists (a
@@ -89,12 +140,21 @@ public final class EquivalenceHarness {
                 runA.cellSet, runA.executions, null, null);
         }
         JsonNode golden = mapper.readTree(goldenFile.toFile());
-        String baselineDetail = compareAgainstGolden(golden, runA);
-        if (baselineDetail != null) {
+        HarnessResult.Comparison cmp = compareAgainstGolden(golden, runA);
+        if (cmp.failureClass != null) {
             return new HarnessResult(
-                FailureClass.LEGACY_DRIFT,
-                baselineDetail,
+                cmp.failureClass,
+                cmp.detail,
                 runA.cellSet, runA.executions, null, null);
+        }
+        if (cmp.sqlDriftDetail != null) {
+            // Advisory SQL drift — record and proceed.
+            HarnessReporter.record(
+                mdx.name,
+                new HarnessResult(
+                    FailureClass.SQL_DRIFT,
+                    cmp.sqlDriftDetail,
+                    runA.cellSet, runA.executions, null, null));
         }
 
         // TODO(worktree-#2): capture RelOptUtil.toString at plan time and
@@ -211,50 +271,105 @@ public final class EquivalenceHarness {
     }
 
     /**
-     * Returns {@code null} if runA matches the golden; otherwise a human-
-     * readable description of the first mismatch.
+     * Two-stage golden comparator:
+     * <ol>
+     *   <li>Cell-set / sqlExecutions count / per-execution seq+rowCount+
+     *       checksum match. Any mismatch is {@link FailureClass#LEGACY_DRIFT}
+     *       and fails the harness.</li>
+     *   <li>Per-execution SQL-string match, gated on
+     *       {@link #sqlCompareMode()}. {@code STRICT} → hard fail as
+     *       {@link FailureClass#SQL_DRIFT}; {@code ADVISORY} → returned as
+     *       {@link HarnessResult.Comparison#sqlDriftDetail} for the caller
+     *       to log via {@link HarnessReporter}; {@code OFF} → not compared.</li>
+     * </ol>
      */
-    private static String compareAgainstGolden(
+    private static HarnessResult.Comparison compareAgainstGolden(
         JsonNode golden,
         FoodMartCapture.CapturedRun run)
     {
+        // --- Stage 1: cell-set parity ---
         String goldenCellSet = golden.path("cellSet").asText();
         if (!Objects.equals(goldenCellSet, run.cellSet)) {
-            return "cellSet differs from golden\n--- golden ---\n"
-                + goldenCellSet
-                + "\n--- runA ---\n" + run.cellSet;
+            return HarnessResult.Comparison.fail(
+                FailureClass.LEGACY_DRIFT,
+                "cellSet differs from golden\n--- golden ---\n"
+                    + goldenCellSet
+                    + "\n--- runA ---\n" + run.cellSet);
         }
         JsonNode execs = golden.path("sqlExecutions");
         if (!execs.isArray()) {
-            return "golden missing sqlExecutions array";
+            return HarnessResult.Comparison.fail(
+                FailureClass.LEGACY_DRIFT,
+                "golden missing sqlExecutions array");
         }
         if (execs.size() != run.executions.size()) {
-            return "sqlExecutions count differs: golden="
-                + execs.size() + " runA=" + run.executions.size();
+            return HarnessResult.Comparison.fail(
+                FailureClass.LEGACY_DRIFT,
+                "sqlExecutions count differs: golden="
+                    + execs.size() + " runA=" + run.executions.size());
         }
+        // Stage 1 continued: seq / rowCount / checksum — these are cell-set-
+        // level signals (row shape, content hash) and remain hard gates.
+        // Also collect first SQL mismatch for stage 2.
+        int sqlMismatchIndex = -1;
+        String sqlMismatchDetail = null;
         for (int i = 0; i < execs.size(); i++) {
             JsonNode ge = execs.get(i);
             CapturedExecution ae = run.executions.get(i);
             int gSeq = ge.path("seq").asInt(-1);
-            String gSql = ge.path("sql").asText();
             int gRowCount = ge.path("rowCount").asInt(-1);
             String gChecksum = ge.path("checksum").asText();
             if (gSeq != ae.seq
-                || !Objects.equals(gSql, ae.sql)
                 || gRowCount != ae.rowCount
                 || !Objects.equals(gChecksum, ae.checksum))
             {
-                return "sqlExecution[" + i + "] differs\n"
-                    + "  golden seq=" + gSeq
-                    + " rowCount=" + gRowCount
-                    + " checksum=" + gChecksum
-                    + "\n  runA  seq=" + ae.seq
-                    + " rowCount=" + ae.rowCount
-                    + " checksum=" + ae.checksum
-                    + "\n  golden sql=" + gSql
-                    + "\n  runA  sql=" + ae.sql;
+                return HarnessResult.Comparison.fail(
+                    FailureClass.LEGACY_DRIFT,
+                    "sqlExecution[" + i + "] differs (cell-set signals)\n"
+                        + "  golden seq=" + gSeq
+                        + " rowCount=" + gRowCount
+                        + " checksum=" + gChecksum
+                        + "\n  runA  seq=" + ae.seq
+                        + " rowCount=" + ae.rowCount
+                        + " checksum=" + ae.checksum);
+            }
+            if (sqlMismatchIndex < 0) {
+                String gSql = ge.path("sql").asText();
+                if (!Objects.equals(gSql, ae.sql)) {
+                    sqlMismatchIndex = i;
+                    sqlMismatchDetail =
+                        "sqlExecution[" + i + "] SQL string differs\n"
+                            + "  golden sql=" + gSql
+                            + "\n  runA  sql=" + ae.sql;
+                }
             }
         }
-        return null;
+
+        // --- Stage 2: SQL-string parity (gated) ---
+        if (sqlMismatchIndex < 0) {
+            return HarnessResult.Comparison.pass();
+        }
+        switch (sqlCompareMode()) {
+        case STRICT:
+            return HarnessResult.Comparison.fail(
+                FailureClass.SQL_DRIFT, sqlMismatchDetail);
+        case OFF:
+            return HarnessResult.Comparison.pass();
+        case ADVISORY:
+        default:
+            return HarnessResult.Comparison.advisorySqlDrift(sqlMismatchDetail);
+        }
+    }
+
+    /**
+     * Package-private test hook for {@link HarnessSqlDriftTest}. Kept
+     * deliberately narrow — just delegates to the private comparator so
+     * tests don't need MDX round-trips to exercise the mode machinery.
+     */
+    static HarnessResult.Comparison compareAgainstGoldenForTest(
+        JsonNode golden,
+        FoodMartCapture.CapturedRun run)
+    {
+        return compareAgainstGolden(golden, run);
     }
 }

@@ -25,6 +25,20 @@ public enum FailureClass {
      * that role.
      */
     LEGACY_DRIFT,
+    /**
+     * Cell-set parity is intact but the per-execution SQL string no longer
+     * matches the committed golden. Soft gate — whether this fails the test
+     * is controlled by {@code -Dharness.sqlCompare={strict,advisory,off}}
+     * (default {@code advisory}, which records the drift via
+     * {@link HarnessReporter} but does not fail).
+     *
+     * <p>Introduced for the Calcite rewrite: {@code RelToSqlConverter} emits
+     * ANSI-join syntax while legacy {@code SqlQuery} emits comma-joins, so
+     * byte-for-byte SQL parity is impossible during the transition. Cell-set
+     * parity — plus rowCount and checksum, which remain under
+     * {@link #LEGACY_DRIFT} — remains the real correctness signal.
+     */
+    SQL_DRIFT,
     /** Gate 2 tripped: interceptor run produced a different MDX cell set. */
     CELL_SET_DRIFT,
     /** Gate 3 tripped: interceptor run emitted a differing SQL rowset. */
