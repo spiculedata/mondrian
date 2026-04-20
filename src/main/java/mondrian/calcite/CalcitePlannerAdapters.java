@@ -20,6 +20,7 @@ import mondrian.rolap.RolapEvaluator;
 import mondrian.rolap.RolapMeasureGroup;
 import mondrian.rolap.RolapMember;
 import mondrian.rolap.RolapNativeSet;
+import mondrian.rolap.RolapProperty;
 import mondrian.rolap.RolapSchema;
 import mondrian.rolap.RolapStar;
 import mondrian.rolap.StarColumnPredicate;
@@ -945,13 +946,32 @@ public final class CalcitePlannerAdapters {
             if (captionExp != null) {
                 emitNecjProjection(b, seen, captionExp, "caption");
             }
+            // Level properties: legacy emits each explicit property's key
+            // column into the SELECT list (see SqlTupleReader
+            // .addLevelMemberSql's getExplicitProperties loop). Emit them
+            // here so the projection's cardinality matches the
+            // LevelColumnLayout built by the reader — without them the
+            // JDBC result has fewer columns than the layout expects and
+            // row-read throws "types cardinality != column count".
+            for (RolapProperty property : attr.getExplicitProperties()) {
+                // Legacy assumes single-column key for property attributes.
+                if (property.getAttribute().getKeyList().size() != 1) {
+                    throw new UnsupportedTranslation(
+                        "fromTupleRead: SetConstraint property "
+                        + property + " has composite key");
+                }
+                RolapSchema.PhysColumn propCol =
+                    property.getAttribute().getKeyList().get(0);
+                emitNecjProjection(b, seen, propCol, "property");
+            }
         }
     }
 
     /**
      * Collects every {@link RolapSchema.PhysRelation} referenced by a
      * NECJ target's hierarchy walk (all non-all levels from root to leaf,
-     * every attribute's keyList / orderByList / nameExp / captionExp).
+     * every attribute's keyList / orderByList / nameExp / captionExp /
+     * explicit property key columns).
      * Used to ensure every such table is joined to the request before
      * any projection references its columns.
      */
@@ -980,6 +1000,11 @@ public final class CalcitePlannerAdapters {
             if (captionExp != null) {
                 addRelationIfReal(out,
                     java.util.Collections.singletonList(captionExp));
+            }
+            for (RolapProperty property : attr.getExplicitProperties()) {
+                if (property.getAttribute().getKeyList().size() == 1) {
+                    addRelationIfReal(out, property.getAttribute().getKeyList());
+                }
             }
         }
         return out;

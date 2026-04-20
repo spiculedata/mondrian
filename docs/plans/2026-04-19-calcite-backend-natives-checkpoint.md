@@ -440,3 +440,41 @@ Net +1 pass: `descendants`.
 
 DescendantsConstraint is cleared. Only `non-empty-rows` remains — the
 NECJ level-properties gap tracked as Task R.
+
+---
+
+## Task R — NECJ projects level properties (non-empty-rows)
+
+### Symptom
+
+`EquivalenceSmokeTest#equivalent[non-empty-rows]` threw
+`types cardinality != column count 4`. The NECJ translator projected
+4 columns (store_country, store_state, store_city, store_name) but
+`LevelColumnLayout` expected 12 — legacy's SELECT list also pulls
+every `<Property>` attribute defined on the leaf `[Store Name]`
+level (store_type, store_manager, store_sqft, grocery_sqft,
+frozen_sqft, meat_sqft, coffee_bar, store_street_address).
+
+### Fix
+
+`CalcitePlannerAdapters.emitNecjTargetProjections` now mirrors the
+trailing `getExplicitProperties()` loop of
+`SqlTupleReader.addLevelMemberSql`: for every explicit property on
+each non-all level, emit the property attribute's key column as
+both projection and GROUP BY. `collectNecjRelations` updated in
+lockstep so property-bearing tables join the request.
+
+### Files changed
+
+| File | Delta |
+|------|-------|
+| `src/main/java/mondrian/calcite/CalcitePlannerAdapters.java` | +29 / -2 |
+
+### Harness state
+
+| Run                                                                              | Result         |
+|----------------------------------------------------------------------------------|----------------|
+| `mvn -Pcalcite-harness -Dmondrian.backend=legacy -Dtest='Equivalence*Test' test` | **34/34 pass** |
+| `mvn -Pcalcite-harness                          -Dtest='Equivalence*Test' test` | **34/34 pass** |
+
+Worktree #2 complete: Calcite 34/34, Legacy 34/34.
