@@ -339,6 +339,8 @@ public class RolapUtil {
         int resultSetConcurrency,
         Util.Function1<java.sql.Statement, Void> callback)
     {
+        sql = mondrian.rolap.sql.SqlInterceptor.loadFromSystemProperty()
+            .onSqlEmitted(sql, null);
         SqlStatement stmt =
             new SqlStatement(
                 dataSource, sql, types, maxRowCount, firstRowOrdinal, locus,
