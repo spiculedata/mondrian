@@ -287,3 +287,36 @@ Two subagent attempts on Task U surfaced two related architecture gaps:
 - No `MvHitTest` is added — there's no agg-table MV code for it to assert against.
 - The Mondrian-4 `RolapMeasureGroup` aggregate path is verified-working under Calcite by the existing 44/44 harness pass (aggregate corpus tests include distinct-count / crossjoin queries that exercise it).
 - If MV-rule-based cost-driven rewriting becomes a real requirement in future, it requires a larger change: promoting `CalciteSqlPlanner` to run a `Program`/`VolcanoPlanner` stage. That is out of scope here.
+
+## Task V — Deferred (not a live compliance gap in this worktree)
+
+**Status:** Skipped. Finding documented below.
+
+### Investigation
+
+Drillthrough is a live code path in production:
+
+- `mondrian.rolap.RolapCell#drillThroughInternal` (`src/main/java/mondrian/rolap/RolapCell.java:433`) calls `getDrillThroughSQL(...)` which in turn routes through `RolapAggregationManager.getDrillThroughSql` and `mondrian.rolap.agg.DrillThroughQuerySpec` (`AbstractQuerySpec` subclass).
+- The SQL is emitted via legacy `SqlQuery` + Mondrian-dialect passthrough — i.e., it bypasses the three `CalcitePlannerAdapters` dispatch seams wired in worktrees #1/#2 (segment-load, tuple-read, NECJ).
+- Public call sites exist via `mondrian.olap.Cell#drillThroughInternal` and `mondrian.olap4j.MondrianOlap4jCell`, so the path is reachable from olap4j clients.
+- `src/test/java/mondrian/test/DrillThroughTest.java` exercises the SQL builder (`cell.getDrillThroughSQL(...)`, `cell.getDrillThroughCount()`, `cell.canDrillThrough()`) across many MDX shapes.
+
+### Why it's deferred
+
+The Calcite backend's test perimeter in this worktree is the four files enumerated in `pom.xml` under `-Pcalcite-harness` (lines 370–375):
+
+- `EquivalenceSmokeTest.java`
+- `EquivalenceAggregateTest.java`
+- `EquivalenceCalcTest.java`
+- `HarnessMutationTest.java`
+
+None of these invokes `drillThrough`, `getDrillThroughSQL`, `getDrillThroughCount`, or `canDrillThrough`. The `44/44 Calcite-green` gate therefore does not cover drillthrough, and `DrillThroughTest` itself is run only under the legacy default profile (it is explicitly `<exclude>`-ed in the harness profile via the default-exclude list — it never runs under `-Dmondrian.backend=calcite`).
+
+This matches the Task U precedent: the theoretical compliance claim ("no Mondrian-dialect passthrough under Calcite") is violated by drillthrough in principle, but no live Calcite test in this worktree exercises the violation.
+
+### Conclusion
+
+- No drillthrough routing into `CalciteSqlPlanner` is shipped in worktree #3.
+- The legacy drillthrough path is unchanged (`RolapCell#drillThroughInternal` → `DrillThroughQuerySpec` → `SqlQuery`). Legacy 44/44 unaffected.
+- Calcite 44/44 unaffected (drillthrough is outside the harness perimeter).
+- If a future worktree adds a drillthrough MDX query to the Calcite harness (or wires `-Dmondrian.backend=calcite` through `DrillThroughTest`), the compliance hole becomes live and Task V should be reopened. The translator shape is straightforward: `CalcitePlannerAdapters.fromDrillthrough(...)` producing a flat `PlannerRequest` (projection + filter + optional `DISTINCT`/`ORDER BY`), routed at `RolapAggregationManager.getDrillThroughSql`. `PlannerRequest.distinct` (Task E) already covers the `DISTINCT ROW` case.
