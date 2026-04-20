@@ -1959,6 +1959,22 @@ public class RolapSchema extends OlapElementBase implements Schema {
         public String toString() {
             return "[Key " + relation + " (" + columnList + ")]";
         }
+
+        /**
+         * Returns the relation this key belongs to.
+         * Visible to the Calcite backend translator.
+         */
+        public PhysRelation getRelation() {
+            return relation;
+        }
+
+        /**
+         * Returns the ordered list of key columns.
+         * Visible to the Calcite backend translator.
+         */
+        public List<PhysColumn> getColumnList() {
+            return columnList;
+        }
     }
 
     /**
@@ -2030,6 +2046,22 @@ public class RolapSchema extends OlapElementBase implements Schema {
 
         public PhysRelation getTo() {
             return sourceKey.relation;
+        }
+
+        /**
+         * Returns the key on the source (PK) side of this link.
+         * Visible to the Calcite backend translator.
+         */
+        public PhysKey getSourceKey() {
+            return sourceKey;
+        }
+
+        /**
+         * Returns the list of target-side (FK) columns for this link.
+         * Visible to the Calcite backend translator.
+         */
+        public List<PhysColumn> getColumnList() {
+            return columnList;
         }
 
         public String toSql() {

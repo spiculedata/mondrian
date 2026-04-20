@@ -10,8 +10,12 @@
 */
 package mondrian.rolap.agg;
 
+import mondrian.calcite.CalciteDialectMap;
+import mondrian.calcite.CalciteMondrianSchema;
 import mondrian.calcite.CalcitePlannerAdapters;
+import mondrian.calcite.CalciteSqlPlanner;
 import mondrian.calcite.MondrianBackend;
+import mondrian.calcite.PlannerRequest;
 import mondrian.calcite.UnsupportedTranslation;
 import mondrian.olap.MondrianException;
 import mondrian.olap.MondrianProperties;
@@ -33,6 +37,8 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 /**
  * <p>The <code>SegmentLoader</code> queries database and loads the data into
@@ -58,12 +64,44 @@ public class SegmentLoader {
     protected final SegmentCacheManager cacheMgr;
 
     /**
+     * Per-RolapStar cache of Calcite planners. Reflecting a JDBC schema is
+     * expensive (opens connections, queries metadata) so we amortize it by
+     * keying the planner on the star instance. Identity-keyed: stars are
+     * recreated when the schema is flushed, which is the cache-bust signal
+     * we want.
+     */
+    private static final ConcurrentMap<RolapStar, CalciteSqlPlanner>
+        CALCITE_PLANNER_CACHE = new ConcurrentHashMap<>();
+
+    /**
      * Creates a SegmentLoader.
      *
      * @param cacheMgr Cache manager
      */
     public SegmentLoader(SegmentCacheManager cacheMgr) {
         this.cacheMgr = cacheMgr;
+    }
+
+    private static CalciteSqlPlanner plannerFor(RolapStar star) {
+        CalciteSqlPlanner cached = CALCITE_PLANNER_CACHE.get(star);
+        if (cached != null) {
+            return cached;
+        }
+        String product =
+            star.getSqlQueryDialect().getDatabaseProduct().name();
+        CalciteMondrianSchema schema =
+            new CalciteMondrianSchema(star.getDataSource(), "mondrian");
+        CalciteSqlPlanner planner =
+            new CalciteSqlPlanner(
+                schema, CalciteDialectMap.forProductName(product));
+        CalciteSqlPlanner existing =
+            CALCITE_PLANNER_CACHE.putIfAbsent(star, planner);
+        return existing != null ? existing : planner;
+    }
+
+    /** Test-only: drop the per-star Calcite planner cache. */
+    public static void clearCalcitePlannerCache() {
+        CALCITE_PLANNER_CACHE.clear();
     }
 
     /**
@@ -642,14 +680,43 @@ public class SegmentLoader {
         String sql = pair.left;
         if (MondrianBackend.current().isCalcite()) {
             try {
-                CalcitePlannerAdapters.fromSegmentLoad(groupingSetsList);
-                // If a translation succeeded, we'd swap `sql` here.
-                // Worktree #1 always throws above, so this is a no-op.
+                PlannerRequest req =
+                    CalcitePlannerAdapters.fromSegmentLoad(
+                        groupingSetsList, compoundPredicateList);
+                CalciteSqlPlanner planner = plannerFor(star);
+                String calciteSql = planner.plan(req);
+                if (Boolean.getBoolean("mondrian.calcite.trace")) {
+                    System.err.println(
+                        "[calcite-ok] " + calciteSql);
+                }
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug(
+                        "Calcite backend: segment-load translated.\n"
+                        + "  legacy: " + sql + "\n"
+                        + "  calcite: " + calciteSql);
+                }
+                sql = calciteSql;
             } catch (UnsupportedTranslation ex) {
+                if (Boolean.getBoolean("mondrian.calcite.trace")) {
+                    System.err.println(
+                        "[calcite-unsupported] " + ex.getMessage());
+                }
                 if (LOGGER.isDebugEnabled()) {
                     LOGGER.debug(
                         "Calcite backend: segment-load fell back to "
                         + "legacy SQL: " + ex.getMessage());
+                }
+            } catch (RuntimeException ex) {
+                // Planner failure must never break parity: record and fall
+                // back to the legacy SQL. This guards against Calcite-side
+                // bugs (schema reflection mismatches, etc.) while the
+                // translator is maturing.
+                CalcitePlannerAdapters.recordSegmentLoadFallback();
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug(
+                        "Calcite backend: planner threw; falling back to "
+                        + "legacy SQL: " + ex.getMessage(),
+                        ex);
                 }
             }
         }
