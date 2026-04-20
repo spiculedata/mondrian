@@ -255,3 +255,35 @@ because `COALESCE` already accepts any arity).
 - Calcite's `RelBuilder.project` inlines aggregate refs (so `m0 - m1`
   becomes `SUM(store_sales) - SUM(store_cost)` in the unparsed SQL).
   This is equivalent-form output; HSQLDB plans identically.
+
+## Task U — Obsolete
+
+**Status:** Skipped. Finding documented below.
+
+### Investigation
+
+Two subagent attempts on Task U surfaced two related architecture gaps:
+
+1. **`CalciteSqlPlanner` is a `RelBuilder` → `RelToSqlConverter` unparser.** It does not run a `VolcanoPlanner` with a rule program, so `MaterializedViewRule` (the design-doc approach) cannot fire regardless of how MVs are registered. That ruled out the original design.
+
+2. **The Mondrian-3 `AggStar`/`AggQuerySpec` execution path is dead.**
+   - `AggTableManager.initialize` (`src/main/java/mondrian/rolap/aggmatcher/AggTableManager.java:79-90`) is gated on `Util.deprecated(false, false)` which always returns `false`.
+   - `RolapStar.addAggStar(...)` is therefore never invoked; `star.getAggStars()` is always empty.
+   - `AggregationManager.generateSql` explicitly documents this at line 246-247:
+     ```java
+     // Find an aggregate table. (There aren't any registered anymore,
+     // so this will never find anything.)
+     AggStar aggStar = findAgg(star, levelBitKey, measureBitKey, rollup);
+     ```
+   - `AggQuerySpec` has a single live caller (`AggregationManager.java:280`), which is the dead branch.
+
+   Therefore rescope option 1 ("route `AggQuerySpec` emission through Calcite") also has no runtime target.
+
+3. **FoodMart's live aggregate path is Mondrian-4 `<MeasureGroup type='aggregate'>`** (`demo/FoodMart.mondrian.xml:495`). That runs via `RolapMeasureGroup`, not `AggStar`. The Calcite dispatch in `SegmentLoader` already covers it — `GroupingSetsList` arrives with the aggregate MeasureGroup's table as its fact. The 44/44 harness pass count under `-Dmondrian.backend=calcite` already demonstrates this works without Calcite-specific MV code.
+
+### Conclusion
+
+- No MvRegistry production code is shipped in worktree #3. Worktree #4 already plans to delete `aggmatcher/` wholesale, consistent with it being inactive.
+- No `MvHitTest` is added — there's no agg-table MV code for it to assert against.
+- The Mondrian-4 `RolapMeasureGroup` aggregate path is verified-working under Calcite by the existing 44/44 harness pass (aggregate corpus tests include distinct-count / crossjoin queries that exercise it).
+- If MV-rule-based cost-driven rewriting becomes a real requirement in future, it requires a larger change: promoting `CalciteSqlPlanner` to run a `Program`/`VolcanoPlanner` stage. That is out of scope here.
