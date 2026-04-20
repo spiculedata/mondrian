@@ -303,6 +303,59 @@ public class CalciteSqlPlannerTest {
                 + hsqlSql,
             hsqlSql, altSql);
     }
+
+    /**
+     * Regression: Calcite's {@code Aggregate} normalises the group set to an
+     * ImmutableBitSet, which re-orders group columns into the input-row's
+     * column-ordinal order. The planner must reproject the group columns
+     * after aggregate so the SELECT list matches the request's group-by
+     * order — Mondrian's segment consumer positionally maps SELECT columns
+     * onto {@code GroupingSet.columns[i]} and a reordered SELECT silently
+     * assigns axis values to the wrong column (cells miss on lookup, every
+     * measure comes back empty).
+     *
+     * <p>In FoodMart's {@code customer} table, {@code marital_status}
+     * precedes {@code gender} physically, so without the reproject Calcite
+     * emits them in (marital_status, gender) order even when the request
+     * lists (gender, marital_status).
+     */
+    @Test
+    public void aggregateSelectOrderMatchesGroupByRequestOrder() {
+        CalciteSqlPlanner planner = plannerFor(HsqldbSqlDialect.DEFAULT);
+        PlannerRequest req = PlannerRequest.builder("sales_fact_1997")
+            .addJoin(new PlannerRequest.Join(
+                "time_by_day", "time_id", "time_id"))
+            .addJoin(new PlannerRequest.Join(
+                "customer", "customer_id", "customer_id"))
+            .addGroupBy(
+                new PlannerRequest.Column("time_by_day", "the_year"))
+            .addGroupBy(
+                new PlannerRequest.Column("customer", "gender"))
+            .addGroupBy(
+                new PlannerRequest.Column("customer", "marital_status"))
+            .addMeasure(new PlannerRequest.Measure(
+                PlannerRequest.AggFn.SUM,
+                new PlannerRequest.Column("sales_fact_1997", "unit_sales"),
+                "m0"))
+            .build();
+        String sql = planner.plan(req);
+        assertNotNull(sql);
+        // Find SELECT-list-position of gender vs marital_status. The
+        // default HSQLDB dialect Calcite ships with unparses identifiers
+        // unquoted, so compare substrings on the raw identifier text.
+        String selectList =
+            sql.substring(0, sql.toUpperCase().indexOf("FROM "));
+        int iGender = selectList.indexOf("gender");
+        int iMarital = selectList.indexOf("marital_status");
+        assertTrue(
+            "expected 'gender' in SELECT: " + sql, iGender > 0);
+        assertTrue(
+            "expected 'marital_status' in SELECT: " + sql, iMarital > 0);
+        assertTrue(
+            "SELECT list must preserve request order: gender before "
+            + "marital_status; got:\n" + sql,
+            iGender < iMarital);
+    }
 }
 
 // End CalciteSqlPlannerTest.java

@@ -120,6 +120,30 @@ public final class CalciteSqlPlanner {
                 aggs.add(aggCall(b, m));
             }
             b.aggregate(b.groupKey(keys), aggs);
+
+            // Calcite's Aggregate normalises the group set to an
+            // ImmutableBitSet, which re-orders group columns into the
+            // input-row's column-ordinal order. That means the emitted
+            // SELECT list's group-by prefix may not match the order we
+            // passed to groupKey(). Mondrian's segment consumer positionally
+            // maps SELECT columns onto GroupingSet.columns[i], so a
+            // reordered SELECT assigns axis values to the wrong column and
+            // cell lookups miss. Re-project to force the intended order:
+            // groupBy columns in request order, followed by measures in
+            // request order.
+            List<RexNode> restored = new ArrayList<>(
+                req.groupBy.size() + req.measures.size());
+            List<String> restoredAliases = new ArrayList<>(
+                req.groupBy.size() + req.measures.size());
+            for (PlannerRequest.Column c : req.groupBy) {
+                restored.add(b.field(c.name));
+                restoredAliases.add(c.name);
+            }
+            for (PlannerRequest.Measure m : req.measures) {
+                restored.add(b.field(m.alias));
+                restoredAliases.add(m.alias);
+            }
+            b.project(restored, restoredAliases, true);
         } else {
             List<RexNode> projs = new ArrayList<>();
             for (PlannerRequest.Column c : req.projections) {
