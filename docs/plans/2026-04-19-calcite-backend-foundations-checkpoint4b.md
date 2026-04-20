@@ -280,3 +280,55 @@ one single bucket (level-members read at schema init) blocks the entire
 corpus. Worktree #2 opens with "implement `fromTupleRead` for
 single-table root-level projections with DISTINCT + ORDER BY" and the
 corpus light will start coming on.
+
+### Task H update — composite-key and multi-target `fromTupleRead`
+
+`CalcitePlannerAdapters.fromTupleRead` now handles the two tuple-read
+shapes that were the dominant non-SqlConstraint first-throws after Task G:
+
+- **Composite-key level** (`attribute.getKeyList().size() > 1`). Every
+  key column is projected in legacy order (`orderBy → key[] → name →
+  caption`) and — when the attribute has no explicit order-by — every key
+  column contributes its own `ORDER BY key_i ASC` clause, matching the
+  legacy `addLevelMemberSql` `SELECT_GROUP_ORDER` behaviour for each key
+  column individually. All key columns must share the same `PhysTable`
+  (composite keys spanning relations stay rejected as snowflake-like).
+- **Multi-target crossjoin** with `targets.size() == 2`. Each target is
+  pre-validated via a shared `shapeFor(...)` helper; on unsupported
+  shapes the thrown message identifies the offending target index
+  (`target[i] unsupported — …`). The two targets' projections and
+  order-bys are concatenated onto the same builder. When the two dim
+  tables differ a CROSS JOIN is added via the new
+  `PlannerRequest.JoinKind.CROSS`. Three-or-more targets stay rejected
+  with a clear message.
+
+`PlannerRequest.Join` gained an optional `JoinKind { INNER, CROSS }`
+(default `INNER` for back-compat) plus a `Join.cross(dim)` factory.
+`CalciteSqlPlanner` honours `JoinKind.CROSS` by emitting
+`b.join(JoinRelType.INNER, b.literal(true))`, which HSQLDB's Calcite
+dialect renders as a comma-separated `FROM` (implicit cartesian).
+
+The pass count stayed at **16/34** — the composite-key and
+multi-target first-throws have been eliminated, but the three queries
+those buckets released all advance to the next wall
+(`fromSegmentLoad: only single-hop dimension joins supported; path
+length=3`, a.k.a. snowflake). The snowflake bucket grew from 3 → 12
+as a result, which is the expected forward motion. Task I (snowflake
+multi-hop joins) is the next obvious unlock.
+
+Legacy harness: 34/34 (translator-only change).
+
+### Post-Task-H first-throw bucket distribution
+
+| Count | First `UnsupportedTranslation` |
+|-------|--------------------------------|
+| 12    | `fromSegmentLoad: only single-hop dimension joins supported; path length=3` (snowflake) |
+| 3     | `fromTupleRead: non-default TupleConstraint … RolapNativeTopCount$TopCountConstraint` |
+| 2     | `fromTupleRead: non-default TupleConstraint … RolapNativeFilter$FilterConstraint` |
+| 2     | `fromTupleRead: non-default TupleConstraint … RolapNativeCrossJoin$NonEmptyCrossJoinConstraint` |
+| 2     | `fromSegmentLoad: OrPredicate across columns not yet supported (cols=2)` |
+| 2     | `fromSegmentLoad: OrPredicate across columns not yet supported (cols=1)` |
+| 1     | `fromTupleRead: non-default TupleConstraint … DescendantsConstraint` |
+
+Both `composite-key` and `multi-target crossjoin` rows have dropped off
+entirely; 12 first-throws now sit on the snowflake gate.

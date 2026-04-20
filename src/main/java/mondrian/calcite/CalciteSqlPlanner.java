@@ -74,11 +74,18 @@ public final class CalciteSqlPlanner {
 
         for (PlannerRequest.Join j : req.joins) {
             b.scan(j.dimTable);
-            b.join(
-                JoinRelType.INNER,
-                b.equals(
-                    b.field(2, 0, j.factKey),
-                    b.field(2, 1, j.dimKey)));
+            if (j.kind == PlannerRequest.JoinKind.CROSS) {
+                // Unconditional cross-join: RelBuilder has no native
+                // cartesian helper, so emit an INNER join on TRUE. Calcite's
+                // unparser renders that as a CROSS JOIN in most dialects.
+                b.join(JoinRelType.INNER, b.literal(true));
+            } else {
+                b.join(
+                    JoinRelType.INNER,
+                    b.equals(
+                        b.field(2, 0, j.factKey),
+                        b.field(2, 1, j.dimKey)));
+            }
         }
 
         if (req.universalFalse) {

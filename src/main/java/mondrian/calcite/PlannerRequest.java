@@ -102,14 +102,30 @@ public final class PlannerRequest {
         }
     }
 
+    /** Join flavour. INNER = equi-join on ({@link Join#factKey},
+     *  {@link Join#dimKey}); CROSS = unconditional cross-join (the key
+     *  fields are ignored). Added for multi-target tuple-read (Task H). */
+    public enum JoinKind { INNER, CROSS }
+
     public static final class Join {
         public final String dimTable;
         public final String factKey;
         public final String dimKey;
+        public final JoinKind kind;
         public Join(String dimTable, String factKey, String dimKey) {
+            this(dimTable, factKey, dimKey, JoinKind.INNER);
+        }
+        public Join(
+            String dimTable, String factKey, String dimKey, JoinKind kind)
+        {
             this.dimTable = dimTable;
             this.factKey = factKey;
             this.dimKey = dimKey;
+            this.kind = kind;
+        }
+        /** Convenience factory for an unconditional CROSS JOIN. */
+        public static Join cross(String dimTable) {
+            return new Join(dimTable, null, null, JoinKind.CROSS);
         }
     }
 

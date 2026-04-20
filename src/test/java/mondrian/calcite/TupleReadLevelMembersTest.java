@@ -77,6 +77,25 @@ public class TupleReadLevelMembersTest {
             CalcitePlannerAdapters.tupleReadUnsupportedCount());
     }
 
+    @Test public void threeTargetCrossjoinRejected() {
+        // Task H raises the multi-target cap to 2. Confirm 3+ still
+        // throws cleanly with a message naming the arity.
+        long before = CalcitePlannerAdapters.tupleReadUnsupportedCount();
+        try {
+            CalcitePlannerAdapters.fromTupleRead(
+                java.util.Arrays.<RolapCubeLevel>asList(null, null, null),
+                DefaultTupleConstraint.instance());
+            fail("expected UnsupportedTranslation for 3-target crossjoin");
+        } catch (UnsupportedTranslation ex) {
+            assertTrue(
+                "message must mention >2 targets: " + ex.getMessage(),
+                ex.getMessage().contains("levels.size=3"));
+        }
+        assertEquals(
+            before + 1,
+            CalcitePlannerAdapters.tupleReadUnsupportedCount());
+    }
+
     @Test public void opaqueObjectEntryStillThrows() {
         // The original Object-typed fromTupleRead remains for back-compat.
         long before = CalcitePlannerAdapters.tupleReadUnsupportedCount();

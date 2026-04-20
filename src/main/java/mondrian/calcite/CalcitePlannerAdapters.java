@@ -141,11 +141,6 @@ public final class CalcitePlannerAdapters {
             throw new UnsupportedTranslation(
                 "fromTupleRead: empty levels list");
         }
-        if (levels.size() != 1) {
-            throw new UnsupportedTranslation(
-                "fromTupleRead: multi-target crossjoin not yet supported "
-                + "(levels.size=" + levels.size() + ")");
-        }
         if (!(constraint instanceof DefaultTupleConstraint)) {
             throw new UnsupportedTranslation(
                 "fromTupleRead: non-default TupleConstraint not yet "
@@ -155,7 +150,79 @@ public final class CalcitePlannerAdapters {
                     : constraint.getClass().getName())
                 + ")");
         }
-        RolapCubeLevel level = levels.get(0);
+        if (levels.size() > 2) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: multi-target crossjoin with >2 targets not "
+                + "yet supported (levels.size=" + levels.size() + ")");
+        }
+
+        // Pre-validate every target and compute its table binding. An
+        // unsupported-shape on any target throws with a composite message
+        // that surfaces the offender.
+        TargetShape[] shapes = new TargetShape[levels.size()];
+        for (int i = 0; i < levels.size(); i++) {
+            try {
+                shapes[i] = shapeFor(levels.get(i));
+            } catch (UnsupportedTranslation ex) {
+                if (levels.size() == 1) {
+                    throw ex;
+                }
+                throw new UnsupportedTranslation(
+                    "fromTupleRead: target[" + i + "] unsupported — "
+                    + ex.getMessage());
+            }
+        }
+
+        // Root-table is the first target's dim table; any additional
+        // targets are added as joins (CROSS when the dim table differs,
+        // nothing when they share a table — rare, but snowflake-to-same-
+        // base can happen).
+        TargetShape first = shapes[0];
+        PlannerRequest.Builder b = PlannerRequest.builder(first.tableName);
+        Set<String> seen = new LinkedHashSet<>();
+        Set<String> crossJoined = new LinkedHashSet<>();
+        crossJoined.add(first.tableAlias);
+
+        emitTargetProjections(b, seen, first);
+        for (int i = 1; i < shapes.length; i++) {
+            TargetShape t = shapes[i];
+            if (!crossJoined.contains(t.tableAlias)) {
+                b.addJoin(PlannerRequest.Join.cross(t.tableName));
+                crossJoined.add(t.tableAlias);
+            }
+            emitTargetProjections(b, seen, t);
+        }
+
+        b.distinct(true);
+        return b.build();
+    }
+
+    /** Pre-computed per-target binding: resolved table + attribute refs.
+     *  Shared by the single-target and multi-target paths. */
+    private static final class TargetShape {
+        final RolapCubeLevel level;
+        final RolapAttribute attribute;
+        final RolapSchema.PhysTable table;
+        final String tableName;
+        final String tableAlias;
+        TargetShape(
+            RolapCubeLevel level,
+            RolapAttribute attribute,
+            RolapSchema.PhysTable table)
+        {
+            this.level = level;
+            this.attribute = attribute;
+            this.table = table;
+            this.tableName = table.getName();
+            this.tableAlias = table.getAlias();
+        }
+    }
+
+    private static TargetShape shapeFor(RolapCubeLevel level) {
+        if (level == null) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: null level in targets");
+        }
         if (level.isAll()) {
             throw new UnsupportedTranslation(
                 "fromTupleRead: all-level read not yet supported");
@@ -175,85 +242,104 @@ public final class CalcitePlannerAdapters {
             throw new UnsupportedTranslation(
                 "fromTupleRead: level has no key columns");
         }
-        if (keyList.size() != 1) {
-            throw new UnsupportedTranslation(
-                "fromTupleRead: composite-key level not yet supported "
-                + "(keyList.size=" + keyList.size() + ")");
-        }
-        RolapSchema.PhysColumn keyCol = keyList.get(0);
-        if (!(keyCol instanceof RolapSchema.PhysRealColumn)) {
-            throw new UnsupportedTranslation(
-                "fromTupleRead: non-real key expression "
-                + keyCol.getClass().getName());
-        }
-        RolapSchema.PhysRelation relation = keyCol.relation;
+        // Composite keys are supported (Task H) — the key columns must all
+        // live on the same table as the rest of the attribute, though.
+        RolapSchema.PhysRelation relation = keyList.get(0).relation;
         if (!(relation instanceof RolapSchema.PhysTable)) {
             throw new UnsupportedTranslation(
                 "fromTupleRead: snowflake hierarchy / non-table relation "
                 + "not yet supported ("
-                + relation.getClass().getName() + ")");
+                + (relation == null ? "null" : relation.getClass().getName())
+                + ")");
         }
         RolapSchema.PhysTable table = (RolapSchema.PhysTable) relation;
-        String tableName = table.getName();
-        String tableAlias = table.getAlias();
+        // All key columns must share the same relation (otherwise we'd have
+        // a snowflake-like composite, which today's single-table path does
+        // not express).
+        for (RolapSchema.PhysColumn kc : keyList) {
+            if (!(kc instanceof RolapSchema.PhysRealColumn)) {
+                throw new UnsupportedTranslation(
+                    "fromTupleRead: non-real key expression "
+                    + kc.getClass().getName());
+            }
+            if (kc.relation != relation) {
+                throw new UnsupportedTranslation(
+                    "fromTupleRead: composite key spans multiple relations "
+                    + "(expected " + relation.getAlias() + ", got "
+                    + (kc.relation == null ? "null" : kc.relation.getAlias())
+                    + ")");
+            }
+        }
+        return new TargetShape(level, attribute, table);
+    }
 
-        // Assemble projections in the same order as addLevelMemberSql:
-        // (1) orderBy columns, (2) key columns, (3) nameExp, (4) captionExp.
-        // Columns that duplicate an earlier projection (same table+name) are
-        // skipped — matching the legacy `layoutBuilder.lookup` dedup.
-        PlannerRequest.Builder b = PlannerRequest.builder(tableName);
-        Set<String> seen = new LinkedHashSet<>();
+    /**
+     * Emits a single target's projections + order-by into the shared
+     * builder. Projection order mirrors legacy {@code addLevelMemberSql}:
+     * order-by columns, then key columns (full list), then nameExp, then
+     * captionExp. Duplicate columns (same alias+name) are skipped so the
+     * cell-set column layout matches the legacy shape for shared columns.
+     */
+    private static void emitTargetProjections(
+        PlannerRequest.Builder b,
+        Set<String> seen,
+        TargetShape t)
+    {
+        String tableAlias = t.tableAlias;
+        RolapAttribute attribute = t.attribute;
 
-        // Order-by list.
-        PlannerRequest.Column firstKeyCol = null;
+        // 1) Order-by columns.
         for (RolapSchema.PhysColumn o : attribute.getOrderByList()) {
             PlannerRequest.Column c = asProjection(o, tableAlias, "order-by");
-            if (seen.add(c.name)) {
+            if (seen.add(tableAlias + "." + c.name)) {
                 b.addProjection(c);
             }
-            // order-by clause: sort on this column in ASC order, nulls last
-            // — mirrors the legacy emission (collateNullsLast=true).
-            b.addOrderBy(new PlannerRequest.OrderBy(
-                c, PlannerRequest.Order.ASC));
+            b.addOrderBy(
+                new PlannerRequest.OrderBy(c, PlannerRequest.Order.ASC));
         }
 
-        // Key column(s).
-        PlannerRequest.Column keyProj = asProjection(keyCol, tableAlias, "key");
-        if (seen.add(keyProj.name)) {
-            b.addProjection(keyProj);
+        // 2) Key columns (full list — composite keys emit every key
+        // column, and every one contributes to the ORDER BY so cell-set
+        // key ordering matches legacy).
+        PlannerRequest.Column firstKeyCol = null;
+        boolean attributeHasOrderBy = !attribute.getOrderByList().isEmpty();
+        for (RolapSchema.PhysColumn kc : attribute.getKeyList()) {
+            PlannerRequest.Column kp = asProjection(kc, tableAlias, "key");
+            if (seen.add(tableAlias + "." + kp.name)) {
+                b.addProjection(kp);
+            }
+            if (firstKeyCol == null) {
+                firstKeyCol = kp;
+            }
+            // Legacy addLevelMemberSql flags every key column with
+            // SELECT_GROUP_ORDER / SELECT_ORDER when there is no explicit
+            // order-by, making each key column part of the ORDER BY list.
+            if (!attributeHasOrderBy) {
+                b.addOrderBy(
+                    new PlannerRequest.OrderBy(
+                        kp, PlannerRequest.Order.ASC));
+            }
         }
-        firstKeyCol = keyProj;
 
-        // Name expression (optional).
+        // 3) Name expression (optional).
         RolapSchema.PhysColumn nameExp = attribute.getNameExp();
         if (nameExp != null) {
             PlannerRequest.Column nameProj =
                 asProjection(nameExp, tableAlias, "name");
-            if (seen.add(nameProj.name)) {
+            if (seen.add(tableAlias + "." + nameProj.name)) {
                 b.addProjection(nameProj);
             }
         }
 
-        // Caption expression (optional).
+        // 4) Caption expression (optional).
         RolapSchema.PhysColumn captionExp = attribute.getCaptionExp();
         if (captionExp != null) {
             PlannerRequest.Column capProj =
                 asProjection(captionExp, tableAlias, "caption");
-            if (seen.add(capProj.name)) {
+            if (seen.add(tableAlias + "." + capProj.name)) {
                 b.addProjection(capProj);
             }
         }
-
-        // If there were no order-by columns in the attribute, legacy still
-        // emits an ORDER BY on the key column (via SELECT_GROUP_ORDER /
-        // SELECT_ORDER clauses in addLevelMemberSql). Mirror that.
-        if (attribute.getOrderByList().isEmpty() && firstKeyCol != null) {
-            b.addOrderBy(new PlannerRequest.OrderBy(
-                firstKeyCol, PlannerRequest.Order.ASC));
-        }
-
-        b.distinct(true);
-        return b.build();
     }
 
     private static PlannerRequest.Column asProjection(

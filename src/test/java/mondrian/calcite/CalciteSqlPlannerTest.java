@@ -185,6 +185,45 @@ public class CalciteSqlPlannerTest {
     }
 
     @Test
+    public void planRequestWithCrossJoinEmitsCrossJoinSql() {
+        // Multi-target tuple-read (Task H) emits a CROSS JOIN between two
+        // dim tables. Verify the planner translates Join.cross(...) into
+        // an unparsed CROSS JOIN (or, at minimum, a join with no equi-key
+        // predicate — some dialects render this as "INNER JOIN ... ON TRUE"
+        // but HSQLDB keeps the CROSS form).
+        CalciteSqlPlanner planner = plannerFor(HsqldbSqlDialect.DEFAULT);
+        PlannerRequest req = PlannerRequest.builder("product_class")
+            .addJoin(PlannerRequest.Join.cross("time_by_day"))
+            .addProjection(
+                new PlannerRequest.Column("product_class", "product_family"))
+            .addProjection(
+                new PlannerRequest.Column("time_by_day", "the_year"))
+            .distinct(true)
+            .build();
+        String sql = planner.plan(req);
+        assertNotNull(sql);
+        String lower = sql.toLowerCase().replaceAll("\\s+", " ");
+        // HSQLDB dialect via Calcite may render an unconditional INNER
+        // JOIN on TRUE as a CROSS JOIN, an "INNER JOIN ... ON TRUE", or
+        // as the comma-separated FROM form (implicit cross product).
+        // Any of those three is a valid cross-join rendering.
+        boolean cross = lower.contains("cross join");
+        boolean innerOnTrue =
+            lower.contains("inner join") && lower.contains("true");
+        // comma-separated FROM: "from product_class , time_by_day"
+        boolean commaFrom =
+            lower.matches(".*from\\s+\\w+\\s*,\\s*\\w+.*");
+        assertTrue(
+            "expected CROSS JOIN / INNER JOIN ON TRUE / comma-FROM in: "
+                + sql,
+            cross || innerOnTrue || commaFrom);
+        assertTrue("expected product_class in: " + sql,
+            lower.contains("product_class"));
+        assertTrue("expected time_by_day in: " + sql,
+            lower.contains("time_by_day"));
+    }
+
+    @Test
     public void dialectAwareness() {
         // Baseline HSQLDB dialect uses double-quoted identifiers; build a
         // custom-context variant using backtick identifier quoting so the
