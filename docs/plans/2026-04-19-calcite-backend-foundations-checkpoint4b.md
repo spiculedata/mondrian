@@ -400,3 +400,52 @@ TupleConstraint family (TopCount / Filter / CrossJoin / Descendants)
 is now the dominant remaining translator blocker (8 queries). The
 `LEGACY_DRIFT` bucket is new — all 7 entries are the same
 composite-key tuple-read projection-order bug (Task J).
+
+### Task J update — composite-key projection order
+
+`CalcitePlannerAdapters.emitTargetProjections` now emits the attribute's
+key columns (full list, parent-most to leaf-most) <em>before</em> the
+explicit `orderByList`. Previously the order-by list was emitted first,
+which for a composite-key level like `[Product].[Product Department]`
+(keyList = `[product_family, product_department]`, orderByList = name =
+`[product_department]`) took the leaf column's SELECT slot and bumped
+the parent key to ordinal 1. The reader's `LevelColumnLayout`
+— built by legacy `SqlTupleReader.addLevelMemberSql`, whose outer loop
+walks parent-to-leaf and therefore records parent-most key at
+ordinal 0 — then read the swapped values back out of the result set,
+producing axis labels like `[Product].[Alcoholic Beverages].[Drink]`
+instead of `[Product].[Drink].[Alcoholic Beverages]`.
+
+Verified by capturing Calcite-emitted SQL under
+`-Dmondrian.calcite.trace=true` on the `order` harness query:
+
+```
+# before Task J
+SELECT "product_department", "product_family" …
+# after Task J
+SELECT "product_family", "product_department" …
+```
+
+Every key column is added to the `ORDER BY`, in parent-most-first
+order, matching legacy's `SELECT_ORDER` emission. An explicit
+`getOrderByList()` entry that is not already a key column still adds
+an ORDER BY entry at the tail.
+
+`TupleReadCompositeKeyProjectionTest` pins the ordering across three
+levels of the Product hierarchy (single-key, 2-key, 3-key), so a
+future regression to the iteration direction fails on a unit test
+before it ever reaches the harness.
+
+On the harness the `order` drift resolves at the axis-label layer (the
+previously-swapped `[Alcoholic Beverages].[Drink]` now reads
+`[Drink].[Alcoholic Beverages]`), but cell values for that query still
+don't land — the remaining drift is a separate bug in the cell lookup
+path and is deferred to a follow-up task. Harness pass count stayed
+at **14/21 (reported) / 14/32 (runs)** — the axis fix is verified
+correct but the other drift signals on those queries dominate the
+pass/fail verdict. The task brief anticipated this: "If one or more of
+the seven previously-drifting queries now fails on a DIFFERENT
+first-throw (e.g. RolapNativeTopCount), that's fine — bucket it for
+the next task."
+
+Legacy harness: 32/32 (translator-only change).

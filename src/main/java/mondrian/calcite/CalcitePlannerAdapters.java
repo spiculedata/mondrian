@@ -275,10 +275,31 @@ public final class CalcitePlannerAdapters {
 
     /**
      * Emits a single target's projections + order-by into the shared
-     * builder. Projection order mirrors legacy {@code addLevelMemberSql}:
-     * order-by columns, then key columns (full list), then nameExp, then
-     * captionExp. Duplicate columns (same alias+name) are skipped so the
-     * cell-set column layout matches the legacy shape for shared columns.
+     * builder. Projection order mirrors legacy {@code addLevelMemberSql}'s
+     * net effect for the leaf level: key columns (full list, parent-most
+     * to leaf-most), then order-by columns, then nameExp, then captionExp.
+     * Duplicate columns (same alias+name) are skipped.
+     *
+     * <p>Legacy builds this order indirectly — its outer loop walks from
+     * the root level down to {@code levelDepth} and for each ancestor
+     * level issues the orderBy/key/name/caption batch in source order.
+     * The ancestor's orderBy is the parent-most key column, which is why
+     * parent keys end up first in the SELECT list. Because the leaf's
+     * attribute keyList already enumerates every ancestor key in
+     * parent-to-leaf order (e.g. {@code [product_family,
+     * product_department]} for {@code [Product].[Product Department]}),
+     * emitting keyList first — before the leaf's own orderBy, which for
+     * a composite-key level is just the leaf name column — reproduces
+     * the same column ordinals legacy's layout builder recorded. See
+     * Task J for the drift this fixes: parent/leaf positions were
+     * swapped on the axis because orderBy was emitted first and
+     * consumed the leaf column before the key loop got to it.
+     *
+     * <p>Every key column is added to the ORDER BY, in parent-most-first
+     * order — matching legacy's behaviour, which flags each key column
+     * with {@code SELECT_ORDER} / {@code SELECT_GROUP_ORDER} on the
+     * last target. An explicit {@code getOrderByList()} (non-key) adds
+     * additional ORDER BY entries after the key ones.
      */
     private static void emitTargetProjections(
         PlannerRequest.Builder b,
@@ -288,36 +309,33 @@ public final class CalcitePlannerAdapters {
         String tableAlias = t.tableAlias;
         RolapAttribute attribute = t.attribute;
 
-        // 1) Order-by columns.
+        // 1) Key columns (full list, parent-most to leaf-most — composite
+        // keys emit every key column, and every one contributes to the
+        // ORDER BY so cell-set key ordering matches legacy).
+        java.util.List<RolapSchema.PhysColumn> keyList =
+            attribute.getKeyList();
+        java.util.Set<String> keyColNames =
+            new java.util.LinkedHashSet<String>();
+        for (RolapSchema.PhysColumn kc : keyList) {
+            PlannerRequest.Column kp = asProjection(kc, tableAlias, "key");
+            if (seen.add(tableAlias + "." + kp.name)) {
+                b.addProjection(kp);
+            }
+            keyColNames.add(kp.name);
+            b.addOrderBy(
+                new PlannerRequest.OrderBy(kp, PlannerRequest.Order.ASC));
+        }
+
+        // 2) Order-by columns (any column not already contributed by the
+        //    key list — e.g. an explicit non-key ordering expression).
         for (RolapSchema.PhysColumn o : attribute.getOrderByList()) {
             PlannerRequest.Column c = asProjection(o, tableAlias, "order-by");
             if (seen.add(tableAlias + "." + c.name)) {
                 b.addProjection(c);
             }
-            b.addOrderBy(
-                new PlannerRequest.OrderBy(c, PlannerRequest.Order.ASC));
-        }
-
-        // 2) Key columns (full list — composite keys emit every key
-        // column, and every one contributes to the ORDER BY so cell-set
-        // key ordering matches legacy).
-        PlannerRequest.Column firstKeyCol = null;
-        boolean attributeHasOrderBy = !attribute.getOrderByList().isEmpty();
-        for (RolapSchema.PhysColumn kc : attribute.getKeyList()) {
-            PlannerRequest.Column kp = asProjection(kc, tableAlias, "key");
-            if (seen.add(tableAlias + "." + kp.name)) {
-                b.addProjection(kp);
-            }
-            if (firstKeyCol == null) {
-                firstKeyCol = kp;
-            }
-            // Legacy addLevelMemberSql flags every key column with
-            // SELECT_GROUP_ORDER / SELECT_ORDER when there is no explicit
-            // order-by, making each key column part of the ORDER BY list.
-            if (!attributeHasOrderBy) {
+            if (!keyColNames.contains(c.name)) {
                 b.addOrderBy(
-                    new PlannerRequest.OrderBy(
-                        kp, PlannerRequest.Order.ASC));
+                    new PlannerRequest.OrderBy(c, PlannerRequest.Order.ASC));
             }
         }
 
