@@ -341,6 +341,11 @@ class MondrianServerVersion {
             <exclude>**/MondrianOlap4jTester.java</exclude>
             <exclude>**/Olap4jTckTest.java</exclude>
             <exclude>**/MondrianTestRunner.java</exclude>
+            <!-- Calcite equivalence harness: expensive end-to-end tests,
+                 opt-in via -Pcalcite-harness. Unit tests covering the
+                 harness's own plumbing still run in the default build. -->
+            <exclude>**/mondrian/test/calcite/EquivalenceSmokeTest.java</exclude>
+            <exclude>**/mondrian/test/calcite/EquivalenceAggregateTest.java</exclude>
           </excludes>
           <testFailureIgnore>true</testFailureIgnore>
         </configuration>
