@@ -1,0 +1,20 @@
+{
+  "mdx" : "select {[Measures].[Unit Sales]} on columns,\n  NON EMPTY [Store].[Store Name].members on rows\nfrom Sales",
+  "cellSet" : "Axis #0:\n{}\nAxis #1:\n{[Measures].[Unit Sales]}\nAxis #2:\n{[Store].[Stores].[USA].[CA].[Beverly Hills].[Store 6]}\n{[Store].[Stores].[USA].[CA].[Los Angeles].[Store 7]}\n{[Store].[Stores].[USA].[CA].[San Diego].[Store 24]}\n{[Store].[Stores].[USA].[CA].[San Francisco].[Store 14]}\n{[Store].[Stores].[USA].[OR].[Portland].[Store 11]}\n{[Store].[Stores].[USA].[OR].[Salem].[Store 13]}\n{[Store].[Stores].[USA].[WA].[Bellingham].[Store 2]}\n{[Store].[Stores].[USA].[WA].[Bremerton].[Store 3]}\n{[Store].[Stores].[USA].[WA].[Seattle].[Store 15]}\n{[Store].[Stores].[USA].[WA].[Spokane].[Store 16]}\n{[Store].[Stores].[USA].[WA].[Tacoma].[Store 17]}\n{[Store].[Stores].[USA].[WA].[Walla Walla].[Store 22]}\n{[Store].[Stores].[USA].[WA].[Yakima].[Store 23]}\nRow #0: 21,333\nRow #1: 25,663\nRow #2: 25,635\nRow #3: 2,117\nRow #4: 26,079\nRow #5: 41,580\nRow #6: 2,237\nRow #7: 24,576\nRow #8: 25,011\nRow #9: 23,591\nRow #10: 35,257\nRow #11: 2,203\nRow #12: 11,491\n",
+  "sqlExecutions" : [ {
+    "seq" : 0,
+    "sql" : "select \"store\".\"store_country\" as \"c0\", \"store\".\"store_state\" as \"c1\", \"store\".\"store_city\" as \"c2\", \"store\".\"store_name\" as \"c3\", \"store\".\"store_type\" as \"c4\", \"store\".\"store_manager\" as \"c5\", \"store\".\"store_sqft\" as \"c6\", \"store\".\"grocery_sqft\" as \"c7\", \"store\".\"frozen_sqft\" as \"c8\", \"store\".\"meat_sqft\" as \"c9\", \"store\".\"coffee_bar\" as \"c10\", \"store\".\"store_street_address\" as \"c11\" from \"sales_fact_1997\" as \"sales_fact_1997\", \"store\" as \"store\" where \"sales_fact_1997\".\"store_id\" = \"store\".\"store_id\" group by \"store\".\"store_country\", \"store\".\"store_state\", \"store\".\"store_city\", \"store\".\"store_name\", \"store\".\"store_type\", \"store\".\"store_manager\", \"store\".\"store_sqft\", \"store\".\"grocery_sqft\", \"store\".\"frozen_sqft\", \"store\".\"meat_sqft\", \"store\".\"coffee_bar\", \"store\".\"store_street_address\" order by CASE WHEN \"store\".\"store_country\" IS NULL THEN 1 ELSE 0 END, \"store\".\"store_country\" ASC, CASE WHEN \"store\".\"store_state\" IS NULL THEN 1 ELSE 0 END, \"store\".\"store_state\" ASC, CASE WHEN \"store\".\"store_city\" IS NULL THEN 1 ELSE 0 END, \"store\".\"store_city\" ASC, CASE WHEN \"store\".\"store_name\" IS NULL THEN 1 ELSE 0 END, \"store\".\"store_name\" ASC",
+    "rowCount" : 13,
+    "checksum" : "sha256:99d79aae08036a76278f6b1172bda751dbb798f5fc2970f324cd5c24921c7345"
+  }, {
+    "seq" : 1,
+    "sql" : "select count(distinct \"store_name\") from \"store\"",
+    "rowCount" : 1,
+    "checksum" : "sha256:da8e426c859d0ec947dfa3a1a61effaf037ab8e1006cd8a2b1afb7c19c031e49"
+  }, {
+    "seq" : 2,
+    "sql" : "select \"store\".\"store_name\" as \"c0\", \"time_by_day\".\"the_year\" as \"c1\", sum(\"sales_fact_1997\".\"unit_sales\") as \"m0\" from \"sales_fact_1997\" as \"sales_fact_1997\", \"store\" as \"store\", \"time_by_day\" as \"time_by_day\" where \"time_by_day\".\"the_year\" = 1997 and \"sales_fact_1997\".\"store_id\" = \"store\".\"store_id\" and \"sales_fact_1997\".\"time_id\" = \"time_by_day\".\"time_id\" group by \"store\".\"store_name\", \"time_by_day\".\"the_year\"",
+    "rowCount" : 13,
+    "checksum" : "sha256:d7d49e8d03776f77b0ec8613cd63ec7dd5c59294ee891eb872d217f27fb89361"
+  } ]
+}

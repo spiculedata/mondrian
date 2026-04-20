@@ -1,0 +1,5 @@
+{
+  "mdx" : "select {[Measures].[Unit Sales]} on columns,\n  {[Store].[USA].[CA].[Los Angeles].Parent} on rows\nfrom Sales",
+  "cellSet" : "Axis #0:\n{}\nAxis #1:\n{[Measures].[Unit Sales]}\nAxis #2:\n{[Store].[Stores].[USA].[CA]}\nRow #0: 74,748\n",
+  "sqlExecutions" : [ ]
+}

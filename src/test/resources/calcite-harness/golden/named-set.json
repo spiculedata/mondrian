@@ -1,0 +1,15 @@
+{
+  "mdx" : "with set [Top Food Departments] as\n  'TopCount([Product].[Product Department].members, 3, [Measures].[Unit Sales])'\nselect {[Measures].[Unit Sales]} on columns,\n  [Top Food Departments] on rows\nfrom Sales",
+  "cellSet" : "Axis #0:\n{}\nAxis #1:\n{[Measures].[Unit Sales]}\nAxis #2:\n{[Product].[Products].[Food].[Produce]}\n{[Product].[Products].[Food].[Snack Foods]}\n{[Product].[Products].[Non-Consumable].[Household]}\nRow #0: 37,792\nRow #1: 30,545\nRow #2: 27,038\n",
+  "sqlExecutions" : [ {
+    "seq" : 0,
+    "sql" : "select \"product_class\".\"product_family\" as \"c0\", \"product_class\".\"product_department\" as \"c1\", sum(\"sales_fact_1997\".\"unit_sales\") as \"c2\" from \"sales_fact_1997\" as \"sales_fact_1997\", \"product\" as \"product\", \"product_class\" as \"product_class\", \"time_by_day\" as \"time_by_day\" where \"time_by_day\".\"the_year\" = 1997 and \"sales_fact_1997\".\"product_id\" = \"product\".\"product_id\" and \"product\".\"product_class_id\" = \"product_class\".\"product_class_id\" and \"sales_fact_1997\".\"time_id\" = \"time_by_day\".\"time_id\" group by \"product_class\".\"product_family\", \"product_class\".\"product_department\" order by CASE WHEN sum(\"sales_fact_1997\".\"unit_sales\") IS NULL THEN 1 ELSE 0 END, sum(\"sales_fact_1997\".\"unit_sales\") DESC, CASE WHEN \"product_class\".\"product_family\" IS NULL THEN 1 ELSE 0 END, \"product_class\".\"product_family\" ASC, CASE WHEN \"product_class\".\"product_department\" IS NULL THEN 1 ELSE 0 END, \"product_class\".\"product_department\" ASC",
+    "rowCount" : 3,
+    "checksum" : "sha256:ca7d7cf097c2fd53d3850f123dac703593fd5840d0e66b4b9eb0ea38a714bfec"
+  }, {
+    "seq" : 1,
+    "sql" : "select \"time_by_day\".\"the_year\" as \"c0\", \"product_class\".\"product_family\" as \"c1\", \"product_class\".\"product_department\" as \"c2\", sum(\"sales_fact_1997\".\"unit_sales\") as \"m0\" from \"sales_fact_1997\" as \"sales_fact_1997\", \"time_by_day\" as \"time_by_day\", \"product\" as \"product\", \"product_class\" as \"product_class\" where \"time_by_day\".\"the_year\" = 1997 and \"product_class\".\"product_department\" in ('Household', 'Produce', 'Snack Foods') and \"sales_fact_1997\".\"time_id\" = \"time_by_day\".\"time_id\" and \"sales_fact_1997\".\"product_id\" = \"product\".\"product_id\" and \"product\".\"product_class_id\" = \"product_class\".\"product_class_id\" group by \"time_by_day\".\"the_year\", \"product_class\".\"product_family\", \"product_class\".\"product_department\"",
+    "rowCount" : 3,
+    "checksum" : "sha256:9d1935cfdb9628634d1df595627957b49a7af568724fe1d98dc2eb7332f0e089"
+  } ]
+}

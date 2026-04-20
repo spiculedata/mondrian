@@ -1,0 +1,5 @@
+{
+  "mdx" : "with member [Measures].[Store Country] as 'Ancestor([Store].[Stores].CurrentMember, [Store].[Stores].[Store Country]).Name'\nselect {[Measures].[Store Country]} on columns,\n  {[Store].[USA].[CA].[Los Angeles]} on rows\nfrom Sales",
+  "cellSet" : "Axis #0:\n{}\nAxis #1:\n{[Measures].[Store Country]}\nAxis #2:\n{[Store].[Stores].[USA].[CA].[Los Angeles]}\nRow #0: USA\n",
+  "sqlExecutions" : [ ]
+}

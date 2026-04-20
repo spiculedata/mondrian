@@ -1,0 +1,10 @@
+{
+  "mdx" : "with member [Measures].[Sales Pct] as '[Measures].[Store Sales] / [Measures].[Store Cost]', format_string = '#.00%'\nselect {[Measures].[Sales Pct]} on columns,\n  {[Product].[Product Family].members} on rows\nfrom Sales\nwhere ([Time].[1997])",
+  "cellSet" : "Axis #0:\n{[Time].[Time].[1997]}\nAxis #1:\n{[Measures].[Sales Pct]}\nAxis #2:\n{[Product].[Products].[Drink]}\n{[Product].[Products].[Food]}\n{[Product].[Products].[Non-Consumable]}\nRow #0: 250.73%\nRow #1: 250.53%\nRow #2: 250.39%\n",
+  "sqlExecutions" : [ {
+    "seq" : 0,
+    "sql" : "select \"product_class\".\"product_family\" as \"c0\" from \"product\" as \"product\", \"product_class\" as \"product_class\" where \"product\".\"product_class_id\" = \"product_class\".\"product_class_id\" group by \"product_class\".\"product_family\" order by CASE WHEN \"product_class\".\"product_family\" IS NULL THEN 1 ELSE 0 END, \"product_class\".\"product_family\" ASC",
+    "rowCount" : 3,
+    "checksum" : "sha256:e3614f4f86801462eb83492a965f84de8ab6ef92f984c31756da41e8d0eba94f"
+  } ]
+}

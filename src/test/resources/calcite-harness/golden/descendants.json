@@ -1,0 +1,15 @@
+{
+  "mdx" : "select {[Measures].[Store Sales]} on columns,\n  Descendants([Time].[1997], [Time].[Month]) on rows\nfrom Sales",
+  "cellSet" : "Axis #0:\n{}\nAxis #1:\n{[Measures].[Store Sales]}\nAxis #2:\n{[Time].[Time].[1997].[Q1].[1]}\n{[Time].[Time].[1997].[Q1].[2]}\n{[Time].[Time].[1997].[Q1].[3]}\n{[Time].[Time].[1997].[Q2].[4]}\n{[Time].[Time].[1997].[Q2].[5]}\n{[Time].[Time].[1997].[Q2].[6]}\n{[Time].[Time].[1997].[Q3].[7]}\n{[Time].[Time].[1997].[Q3].[8]}\n{[Time].[Time].[1997].[Q3].[9]}\n{[Time].[Time].[1997].[Q4].[10]}\n{[Time].[Time].[1997].[Q4].[11]}\n{[Time].[Time].[1997].[Q4].[12]}\nRow #0: 45,539.69\nRow #1: 44,058.79\nRow #2: 50,029.87\nRow #3: 42,878.25\nRow #4: 44,456.29\nRow #5: 45,331.73\nRow #6: 50,246.88\nRow #7: 46,199.04\nRow #8: 43,825.97\nRow #9: 42,342.27\nRow #10: 53,363.71\nRow #11: 56,965.64\n",
+  "sqlExecutions" : [ {
+    "seq" : 0,
+    "sql" : "select \"time_by_day\".\"the_year\" as \"c0\", \"time_by_day\".\"quarter\" as \"c1\", \"time_by_day\".\"month_of_year\" as \"c2\" from \"time_by_day\" as \"time_by_day\" where (\"time_by_day\".\"the_year\" = 1997 and \"time_by_day\".\"quarter\" = 'Q3' or \"time_by_day\".\"the_year\" = 1997 and \"time_by_day\".\"quarter\" = 'Q4') group by \"time_by_day\".\"the_year\", \"time_by_day\".\"quarter\", \"time_by_day\".\"month_of_year\" order by CASE WHEN \"time_by_day\".\"the_year\" IS NULL THEN 1 ELSE 0 END, \"time_by_day\".\"the_year\" ASC, CASE WHEN \"time_by_day\".\"quarter\" IS NULL THEN 1 ELSE 0 END, \"time_by_day\".\"quarter\" ASC, CASE WHEN \"time_by_day\".\"month_of_year\" IS NULL THEN 1 ELSE 0 END, \"time_by_day\".\"month_of_year\" ASC",
+    "rowCount" : 6,
+    "checksum" : "sha256:9eee0d4a33c34ae26cb6c8c018beae64b46282c5c3fc7a061c9ed3eac0c9e6dd"
+  }, {
+    "seq" : 1,
+    "sql" : "select \"time_by_day\".\"the_year\" as \"c0\", \"time_by_day\".\"month_of_year\" as \"c1\", sum(\"sales_fact_1997\".\"store_sales\") as \"m0\" from \"sales_fact_1997\" as \"sales_fact_1997\", \"time_by_day\" as \"time_by_day\" where \"time_by_day\".\"the_year\" = 1997 and \"sales_fact_1997\".\"time_id\" = \"time_by_day\".\"time_id\" group by \"time_by_day\".\"the_year\", \"time_by_day\".\"month_of_year\"",
+    "rowCount" : 12,
+    "checksum" : "sha256:4ea7bce5320d62050833c25bf92215e7f88600e555e62905b4c41b476d932576"
+  } ]
+}

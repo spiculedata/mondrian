@@ -1,0 +1,5 @@
+{
+  "mdx" : "with member [Measures].[Prev Qtr Sales] as '([Measures].[Unit Sales], ParallelPeriod([Time].[Time].[Quarter], 1, [Time].[Time].CurrentMember))'\nselect {[Measures].[Unit Sales], [Measures].[Prev Qtr Sales]} on columns,\n  {[Time].[1997].[Q2], [Time].[1997].[Q3]} on rows\nfrom Sales",
+  "cellSet" : "Axis #0:\n{}\nAxis #1:\n{[Measures].[Unit Sales]}\n{[Measures].[Prev Qtr Sales]}\nAxis #2:\n{[Time].[Time].[1997].[Q2]}\n{[Time].[Time].[1997].[Q3]}\nRow #0: 62,610\nRow #0: 66,291\nRow #1: 65,848\nRow #1: 62,610\n",
+  "sqlExecutions" : [ ]
+}

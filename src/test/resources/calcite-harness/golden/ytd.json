@@ -1,0 +1,5 @@
+{
+  "mdx" : "with member [Measures].[YTD Sales] as 'Sum(YTD(), [Measures].[Store Sales])', format_string='#.00'\nselect {[Measures].[YTD Sales]} on columns,\n  {[Time].[1997].[Q2].[4]} on rows\nfrom Sales",
+  "cellSet" : "Axis #0:\n{}\nAxis #1:\n{[Measures].[YTD Sales]}\nAxis #2:\n{[Time].[Time].[1997].[Q2].[4]}\nRow #0: 182506.60\n",
+  "sqlExecutions" : [ ]
+}
