@@ -37,7 +37,7 @@ import static org.junit.Assert.assertNull;
  * <ul>
  *   <li>{@link #passesWhenInterceptorIsIdentityAndGoldenMatches()} — all gates
  *       pass with an identity interceptor and the committed goldens.</li>
- *   <li>{@link #detectsBaselineDriftWhenGoldenIsCorrupt()} — Gate 1 fires
+ *   <li>{@link #detectsLegacyDriftWhenGoldenIsCorrupt()} — Gate 1 fires
  *       when the golden is tampered with.</li>
  *   <li>{@link #detectsSqlRowsetDriftUnderMutatingInterceptor()} — Gate 2 or
  *       3 fires when the interceptor deliberately changes SQL semantics.
@@ -92,7 +92,7 @@ public class EquivalenceHarnessTest {
     }
 
     @Test
-    public void detectsBaselineDriftWhenGoldenIsCorrupt() throws Exception {
+    public void detectsLegacyDriftWhenGoldenIsCorrupt() throws Exception {
         Path tempGolden = Files.createTempDirectory("eh-bad-golden");
         // Copy real goldens over, then mutate basic-select.json's cellSet.
         try (Stream<Path> paths = Files.list(GOLDEN_DIR)) {
@@ -122,8 +122,8 @@ public class EquivalenceHarnessTest {
         EquivalenceHarness h = new EquivalenceHarness(tempGolden);
         HarnessResult r = h.run(basicSelect, IdentityInterceptor.class);
         assertEquals(
-            "expected BASELINE_DRIFT; detail=" + r.detail,
-            FailureClass.BASELINE_DRIFT, r.failureClass);
+            "expected LEGACY_DRIFT; detail=" + r.detail,
+            FailureClass.LEGACY_DRIFT, r.failureClass);
         assertNull(
             "Run B must not have been executed once Gate 1 tripped",
             r.runBCellSet);
@@ -150,7 +150,7 @@ public class EquivalenceHarnessTest {
             FailureClass.PASS, r.failureClass);
         assertNotEquals(
             "Gate 1 should not fire; baseline run used identity interceptor",
-            FailureClass.BASELINE_DRIFT, r.failureClass);
+            FailureClass.LEGACY_DRIFT, r.failureClass);
     }
 
     /** Identity: returns SQL unchanged. */

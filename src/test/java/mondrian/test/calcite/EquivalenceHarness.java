@@ -17,9 +17,12 @@ import mondrian.rolap.sql.SqlInterceptor;
 import mondrian.test.calcite.corpus.SmokeCorpus.NamedMdx;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Three-gate pipeline that detects drift introduced by inserting a
@@ -27,7 +30,7 @@ import java.util.Objects;
  *
  * <p>Gates, in order:
  * <ol>
- *   <li><b>BASELINE_DRIFT:</b> classic Mondrian (no interceptor) produces a
+ *   <li><b>LEGACY_DRIFT:</b> classic Mondrian (no interceptor) produces a
  *       cell-set + per-execution SQL/checksum sequence that must match the
  *       recorded golden under {@code goldenDir}.</li>
  *   <li><b>CELL_SET_DRIFT:</b> with the interceptor installed, the MDX cell
@@ -39,10 +42,23 @@ import java.util.Objects;
  * <p>The harness installs the interceptor via the {@code mondrian.sqlInterceptor}
  * system property — deliberately the production wiring — and restores the
  * prior value in a {@code finally} block.
+ *
+ * <p>A fourth gate, {@link FailureClass#PLAN_DRIFT}, is scaffolded via
+ * {@link #comparePlanSnapshot(String, String, Path)} but not yet wired into
+ * the pipeline — see TODO below.
  */
 public final class EquivalenceHarness {
 
     public static final String SYS_PROP = FoodMartCapture.INTERCEPTOR_SYS_PROP;
+
+    /**
+     * Default location of plan-snapshot goldens. The directory exists (a
+     * {@code .gitkeep} placeholder is committed) but is empty in worktree #1;
+     * the snapshot comparator is therefore a no-op for every query until
+     * worktree #2 starts populating {@code <name>.plan} files.
+     */
+    public static final Path DEFAULT_GOLDEN_PLANS_DIR =
+        Paths.get("src/test/resources/calcite-harness/golden-plans");
 
     private final Path goldenDir;
     private final ObjectMapper mapper;
@@ -64,11 +80,11 @@ public final class EquivalenceHarness {
         FoodMartCapture.CapturedRun runA =
             FoodMartCapture.executeCold(mdx, null);
 
-        // --- Gate 1: BASELINE_DRIFT ---
+        // --- Gate 1: LEGACY_DRIFT ---
         Path goldenFile = goldenDir.resolve(mdx.name + ".json");
         if (!Files.exists(goldenFile)) {
             return new HarnessResult(
-                FailureClass.BASELINE_DRIFT,
+                FailureClass.LEGACY_DRIFT,
                 "golden not found: " + goldenFile,
                 runA.cellSet, runA.executions, null, null);
         }
@@ -76,10 +92,16 @@ public final class EquivalenceHarness {
         String baselineDetail = compareAgainstGolden(golden, runA);
         if (baselineDetail != null) {
             return new HarnessResult(
-                FailureClass.BASELINE_DRIFT,
+                FailureClass.LEGACY_DRIFT,
                 baselineDetail,
                 runA.cellSet, runA.executions, null, null);
         }
+
+        // TODO(worktree-#2): capture RelOptUtil.toString at plan time and
+        // pipe it through comparePlanSnapshot(mdx.name, planText,
+        // DEFAULT_GOLDEN_PLANS_DIR). When it returns non-empty, raise a
+        // PLAN_DRIFT HarnessResult here. Until plan capture is implemented
+        // the comparator stays exposed only as a public method for unit tests.
 
         // --- Run B: interceptor installed via system property ---
         FoodMartCapture.CapturedRun runB =
@@ -131,6 +153,61 @@ public final class EquivalenceHarness {
             FailureClass.PASS, "ok",
             runA.cellSet, runA.executions,
             runB.cellSet, runB.executions);
+    }
+
+    /**
+     * Pure-text plan-snapshot comparator for the upcoming PLAN_DRIFT gate.
+     *
+     * <p>Resolves {@code <baseDir>/<queryName>.plan}. If the file is absent
+     * (the worktree-#1 default for every query) the method returns
+     * {@link Optional#empty()} — i.e. "no drift, harness silent". If
+     * present, both the on-disk plan and {@code planText} are stripped of
+     * trailing whitespace and compared verbatim. On mismatch the returned
+     * Optional carries a one-line diff summary suitable for the
+     * {@link HarnessResult#detail} field.
+     *
+     * <p>{@code baseDir} is a parameter (not hard-coded to
+     * {@link #DEFAULT_GOLDEN_PLANS_DIR}) so unit tests can point at a
+     * scratch dir without writing into {@code src/test/resources}.
+     */
+    public static Optional<String> comparePlanSnapshot(
+        String queryName,
+        String planText,
+        Path baseDir)
+        throws IOException
+    {
+        Objects.requireNonNull(queryName, "queryName");
+        Objects.requireNonNull(planText, "planText");
+        Objects.requireNonNull(baseDir, "baseDir");
+        Path planFile = baseDir.resolve(queryName + ".plan");
+        if (!Files.exists(planFile)) {
+            return Optional.empty();
+        }
+        String onDisk = new String(
+            Files.readAllBytes(planFile), StandardCharsets.UTF_8);
+        String left = stripTrailingWhitespace(onDisk);
+        String right = stripTrailingWhitespace(planText);
+        if (left.equals(right)) {
+            return Optional.empty();
+        }
+        return Optional.of(
+            "plan snapshot differs for " + queryName
+            + " (file=" + planFile + ")"
+            + "\n--- golden ---\n" + left
+            + "\n--- captured ---\n" + right);
+    }
+
+    private static String stripTrailingWhitespace(String s) {
+        int end = s.length();
+        while (end > 0) {
+            char c = s.charAt(end - 1);
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+                end--;
+            } else {
+                break;
+            }
+        }
+        return s.substring(0, end);
     }
 
     /**

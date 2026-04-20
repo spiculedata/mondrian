@@ -47,7 +47,7 @@ public class HarnessMutationTest {
 
     /**
      * Minimum number of queries (out of 20) that must register a
-     * non-PASS / non-BASELINE_DRIFT failure class for the harness to be
+     * non-PASS / non-LEGACY_DRIFT failure class for the harness to be
      * considered to "have teeth". Three is robust against single-query
      * coincidences while still tolerating queries that have no predicate
      * {@code =} to rewrite.
@@ -64,7 +64,7 @@ public class HarnessMutationTest {
         EquivalenceHarness h = new EquivalenceHarness(GOLDEN_DIR);
         int drifted = 0;
         int passed = 0;
-        int baselineDrift = 0;
+        int legacyDrift = 0;
         Map<FailureClass, Integer> classCounts = new LinkedHashMap<>();
         List<String> driftDetails = new ArrayList<>();
 
@@ -75,14 +75,15 @@ public class HarnessMutationTest {
             case PASS:
                 passed++;
                 break;
-            case BASELINE_DRIFT:
-                baselineDrift++;
-                // Do not count baseline drift as a caught mutation —
+            case LEGACY_DRIFT:
+                legacyDrift++;
+                // Do not count legacy drift as a caught mutation —
                 // it would mean the goldens are wrong, not that the
                 // harness spotted our injected semantic change.
                 break;
             case CELL_SET_DRIFT:
             case SQL_ROWSET_DRIFT:
+            case PLAN_DRIFT:
             default:
                 drifted++;
                 driftDetails.add(q.name + " -> " + r.failureClass);
@@ -95,7 +96,7 @@ public class HarnessMutationTest {
             + " total=" + SmokeCorpus.queries().size()
             + " drifted=" + drifted
             + " passed=" + passed
-            + " baselineDrift=" + baselineDrift);
+            + " legacyDrift=" + legacyDrift);
         for (String d : driftDetails) {
             System.out.println("  " + d);
         }

@@ -39,7 +39,7 @@ import java.util.List;
  * running all corpus queries on a single shared connection would warm the
  * schema/segment caches, causing later queries to emit fewer SQL statements
  * than a cold-start harness would see — guaranteeing
- * {@link FailureClass#BASELINE_DRIFT BASELINE_DRIFT} at
+ * {@link FailureClass#LEGACY_DRIFT LEGACY_DRIFT} at
  * {@link EquivalenceHarness} time.
  *
  * <p><b>Deliberate deviation from the plan:</b> only {@code rowCount} and
