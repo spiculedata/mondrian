@@ -34,14 +34,40 @@ public final class CalcPushdownRegistry {
     public static final class Entry {
         public final Member member;
         public final Exp expression;
+        /** Cached analyzer verdict, if any. {@code null} means the
+         *  registering code did not pre-classify — callers may
+         *  re-classify on demand. */
+        public final ArithmeticCalcAnalyzer.Classification classification;
         public Entry(Member m, Exp e) {
+            this(m, e, null);
+        }
+        public Entry(
+            Member m, Exp e,
+            ArithmeticCalcAnalyzer.Classification c)
+        {
             this.member = m;
             this.expression = e;
+            this.classification = c;
         }
     }
 
     private static final ThreadLocal<List<Entry>> ACTIVE =
         new ThreadLocal<>();
+
+    /**
+     * Cross-thread registry keyed by the Mondrian query
+     * {@link mondrian.server.Execution}. Needed because the MDX
+     * submitter thread registers calcs, but segment-load translation
+     * runs on the {@code SegmentCacheManager$ACTOR} or
+     * {@code RolapResultShepherd} worker. A ThreadLocal alone is
+     * insufficient.
+     *
+     * <p>Kept small: one entry per concurrent query. Cleared by the
+     * {@link mondrian.rolap.RolapResult} finally block when the query
+     * completes.
+     */
+    private static final java.util.concurrent.ConcurrentMap<Object, List<Entry>>
+        BY_EXECUTION = new java.util.concurrent.ConcurrentHashMap<>();
 
     /** Counters — test-visible via {@link CalcitePlannerAdapters}. */
     private static final AtomicLong PUSHED = new AtomicLong();
@@ -63,13 +89,55 @@ public final class CalcPushdownRegistry {
         ACTIVE.remove();
     }
 
-    /** Snapshot; never null. */
+    /**
+     * Register entries for an {@link mondrian.server.Execution}. Used by
+     * the RolapResult hook so the list is reachable from the segment-load
+     * translator which runs on a different pool thread.
+     */
+    public static void activateForExecution(
+        Object execution, List<Entry> entries)
+    {
+        if (execution == null) {
+            return;
+        }
+        if (entries == null || entries.isEmpty()) {
+            BY_EXECUTION.remove(execution);
+            return;
+        }
+        BY_EXECUTION.put(execution, new ArrayList<>(entries));
+    }
+
+    /** Clear the execution-keyed registry slot. */
+    public static void clearExecution(Object execution) {
+        if (execution == null) {
+            return;
+        }
+        BY_EXECUTION.remove(execution);
+    }
+
+    /**
+     * Snapshot of active entries. Consults the thread-local first
+     * (test-only callers populate this directly); falls back to the
+     * execution-keyed map using {@code Locus.peek().execution} as the
+     * key. Never null.
+     */
     public static List<Entry> active() {
         List<Entry> e = ACTIVE.get();
-        if (e == null || e.isEmpty()) {
-            return java.util.Collections.emptyList();
+        if (e != null && !e.isEmpty()) {
+            return java.util.Collections.unmodifiableList(e);
         }
-        return java.util.Collections.unmodifiableList(e);
+        // Fallback to the Execution-keyed map — the hot path for the
+        // RolapResult hook, where segment loads run on pool workers.
+        try {
+            Object exec = mondrian.server.Locus.peek().execution;
+            List<Entry> fromExec = BY_EXECUTION.get(exec);
+            if (fromExec != null && !fromExec.isEmpty()) {
+                return java.util.Collections.unmodifiableList(fromExec);
+            }
+        } catch (Throwable ignored) {
+            // No Locus on this thread — fall through.
+        }
+        return java.util.Collections.emptyList();
     }
 
     /** Increment pushed-count. */

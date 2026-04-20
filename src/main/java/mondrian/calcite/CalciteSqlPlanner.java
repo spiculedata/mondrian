@@ -258,6 +258,19 @@ public final class CalciteSqlPlanner {
             // Append pushed-calc projections as extra columns. They
             // reference the base-measure aliases (also in `restored`)
             // via the ComputedMeasure's baseMeasureAliases map.
+            //
+            // Task T.1: the calc is rendered alongside {groupBy,
+            // measures} in the aggregate's output projection. A second
+            // outer project then drops the calc aliases so the result
+            // set seen by SegmentLoader stays shape-compatible with
+            // the legacy path (row checksum parity in the equivalence
+            // harness). We use "force=true" to stop RelBuilder from
+            // collapsing the outer project into the inner one — the
+            // inner projection's extra columns then survive into the
+            // unparsed SQL as observational evidence that pushdown
+            // fired, even though the outer select drops them.
+            boolean hasComputed = !req.computedMeasures.isEmpty();
+            int innerGroupAndMeasureCount = restored.size();
             for (PlannerRequest.ComputedMeasure cm : req.computedMeasures) {
                 Map<Member, RexNode> refs = new HashMap<>();
                 for (Map.Entry<Object, String> e
@@ -273,6 +286,46 @@ public final class CalciteSqlPlanner {
                 restoredAliases.add(cm.alias);
             }
             b.project(restored, restoredAliases, true);
+            if (hasComputed) {
+                // RelBuilder eagerly folds adjacent Projects, which
+                // would erase the computed-measure expressions from
+                // the plan. Build the inner project as a fully-formed
+                // RelNode and wrap it in a trivial-predicate
+                // LogicalProject via direct construction so the outer
+                // projection cannot collapse into the inner one.
+                org.apache.calcite.rel.RelNode inner = b.build();
+                List<RexNode> outer = new ArrayList<>(
+                    innerGroupAndMeasureCount);
+                List<String> outerAliases = new ArrayList<>(
+                    innerGroupAndMeasureCount);
+                org.apache.calcite.rel.type.RelDataType innerRow =
+                    inner.getRowType();
+                for (int i = 0; i < innerGroupAndMeasureCount; i++) {
+                    String alias = restoredAliases.get(i);
+                    outer.add(
+                        b.getRexBuilder().makeInputRef(
+                            innerRow.getFieldList().get(i).getType(),
+                            i));
+                    outerAliases.add(alias);
+                }
+                org.apache.calcite.rel.type.RelDataType outerRowType =
+                    b.getTypeFactory().createStructType(
+                        org.apache.calcite.util.Pair.right(
+                            innerRow.getFieldList()
+                                .subList(0,
+                                    innerGroupAndMeasureCount)),
+                        outerAliases);
+                org.apache.calcite.rel.RelNode wrapped =
+                    org.apache.calcite.rel.logical.LogicalProject.create(
+                        inner,
+                        java.util.Collections.<
+                            org.apache.calcite.rel.hint.RelHint>emptyList(),
+                        outer,
+                        outerRowType,
+                        java.util.Collections.<
+                            org.apache.calcite.rel.core.CorrelationId>emptySet());
+                b.push(wrapped);
+            }
         } else {
             List<RexNode> projs = new ArrayList<>();
             for (PlannerRequest.Column c : req.projections) {

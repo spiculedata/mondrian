@@ -186,21 +186,18 @@ public final class ArithmeticCalcTranslator {
             + name + "/" + syn + "/" + args.length);
     }
 
-    /** CASE WHEN rhs = 0 THEN NULL ELSE lhs / rhs END — matches
-     *  Mondrian's empty-on-x/0 semantics. Always emitted; no runtime
-     *  check on the operand shape needed because the wrapping cost is
-     *  trivial and HSQLDB's optimiser folds it when {@code rhs} is a
-     *  non-zero literal. */
+    /** {@code lhs / NULLIF(rhs, 0)} — matches Mondrian's empty-on-x/0
+     *  semantics. Switched from a {@code CASE WHEN rhs = 0 THEN NULL
+     *  ELSE lhs / rhs END} rendering to {@code NULLIF} because HSQLDB
+     *  1.8 rejects the aggregate-in-CASE-WHEN form with "Not a
+     *  condition". {@code NULLIF} is a SQL-92 standard and is accepted
+     *  by every dialect in the harness, including HSQLDB 1.8. */
     private RexNode safeDivide(RexNode l, RexNode r) {
         RexNode zero = builder.makeExactLiteral(BigDecimal.ZERO);
-        RexNode isZero = builder.makeCall(
-            SqlStdOperatorTable.EQUALS, r, zero);
-        RexNode nullLit = builder.makeNullLiteral(
-            builder.getTypeFactory().createSqlType(SqlTypeName.DOUBLE));
-        RexNode div = builder.makeCall(
-            SqlStdOperatorTable.DIVIDE, l, r);
+        RexNode safeR = builder.makeCall(
+            SqlStdOperatorTable.NULLIF, r, zero);
         return builder.makeCall(
-            SqlStdOperatorTable.CASE, isZero, nullLit, div);
+            SqlStdOperatorTable.DIVIDE, l, safeR);
     }
 
     private RexNode walkComparison(ResolvedFunCall c) {

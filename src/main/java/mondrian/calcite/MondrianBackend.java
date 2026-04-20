@@ -12,4 +12,9 @@ public enum MondrianBackend {
     }
 
     public boolean isCalcite() { return this == CALCITE; }
+
+    /** Convenience: {@code current() == CALCITE}. */
+    public static boolean isCurrentCalcite() {
+        return current() == CALCITE;
+    }
 }

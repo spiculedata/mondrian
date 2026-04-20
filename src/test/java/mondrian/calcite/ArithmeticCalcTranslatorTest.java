@@ -123,12 +123,14 @@ public class ArithmeticCalcTranslatorTest {
         assertTrue("expected * in " + n, n.toString().contains("*"));
     }
 
-    @Test public void divisionWrappedInCaseWhenZero() {
+    @Test public void divisionWrappedInNullifGuard() {
         RexNode n = translate(
             "[Measures].[Store Sales] / [Measures].[Unit Sales]");
         String s = n.toString();
-        assertTrue("divide-by-zero guard missing: " + s,
-            s.contains("CASE") && s.contains("/"));
+        // Divide-by-zero guard renders as NULLIF(rhs, 0) — switched
+        // from a CASE-WHEN rendering for HSQLDB 1.8 compatibility.
+        assertTrue("NULLIF divide-by-zero guard missing: " + s,
+            s.contains("NULLIF") && s.contains("/"));
     }
 
     @Test public void unaryMinus() {

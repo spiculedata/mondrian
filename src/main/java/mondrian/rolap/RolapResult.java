@@ -94,6 +94,17 @@ public class RolapResult extends ResultBase {
             return;
         }
 
+        // Task T.1: under backend=calcite, walk the query's calc members,
+        // classify via ArithmeticCalcAnalyzer, and register pushable ones
+        // with CalcPushdownRegistry. Cleared in the finally below so the
+        // per-thread and Execution-keyed registry entries do not leak
+        // across queries. No-op on legacy and on queries without calc
+        // members. The Execution handle is load-bearing — segment-load
+        // translation runs on SegmentCacheManager worker threads, so a
+        // ThreadLocal alone would not be reachable there.
+        mondrian.calcite.CalcitePlannerAdapters
+            .registerCalcsFromQuery(query, execution);
+
         boolean normalExecution = true;
         try {
             // This call to clear the cube's cache only has an
@@ -499,6 +510,12 @@ public class RolapResult extends ResultBase {
                 // clear out the whole expression cache at the end of a query.
                 evaluator.clearExpResultCache(true);
             }
+            // Task T.1: clear both the per-thread and Execution-keyed
+            // pushable-calc registry so state does not leak into the
+            // next query on this thread or across the pool workers.
+            mondrian.calcite.CalcPushdownRegistry.clear();
+            mondrian.calcite.CalcPushdownRegistry.clearExecution(
+                execution);
             if (LOGGER.isDebugEnabled()) {
                 LOGGER.debug("RolapResult<init>: " + Util.printMemory());
             }

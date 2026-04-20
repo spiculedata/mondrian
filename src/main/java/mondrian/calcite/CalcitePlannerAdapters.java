@@ -1798,6 +1798,10 @@ public final class CalcitePlannerAdapters {
             throw new UnsupportedTranslation(
                 "fromSegmentLoad: no segments (no measures)");
         }
+        // Map from RolapStar.Measure → its alias in the request, used
+        // when resolving a pushable calc's base-measure references below.
+        java.util.Map<RolapStar.Measure, String> starMeasureAliases =
+            new java.util.LinkedHashMap<>();
         for (int i = 0; i < segments.size(); i++) {
             RolapStar.Measure m = segments.get(i).aggMeasure;
             if (m.getTable() != factTable) {
@@ -1813,12 +1817,66 @@ public final class CalcitePlannerAdapters {
             }
             AggOp op = mapAggregator(m.getAggregator());
             String mcol = ((RolapSchema.PhysRealColumn) mexpr).name;
+            String alias = "m" + i;
             b.addMeasure(
                 new PlannerRequest.Measure(
                     op.fn,
                     new PlannerRequest.Column(factTable.getAlias(), mcol),
-                    "m" + i,
+                    alias,
                     op.distinct));
+            starMeasureAliases.put(m, alias);
+        }
+
+        // 3) Computed (calc) measures from the per-query registry. For
+        //    each pushable calc whose base measures are a subset of the
+        //    segment-load's measures, emit a ComputedMeasure so the
+        //    planner renders it as a post-aggregate projection.
+        //
+        //    Task T.1: runtime-hook path. If the registry is empty (no
+        //    calcs, or non-calcite backend) this loop is a no-op.
+        int calcIdx = 0;
+        for (CalcPushdownRegistry.Entry entry
+            : CalcPushdownRegistry.active())
+        {
+            ArithmeticCalcAnalyzer.Classification cls =
+                (entry.classification != null)
+                    ? entry.classification
+                    : ArithmeticCalcAnalyzer.classify(
+                        entry.expression,
+                        java.util.Collections.<Member>emptySet());
+            if (!cls.isPushable()) {
+                continue;
+            }
+            java.util.Map<Object, String> refs =
+                new java.util.LinkedHashMap<>();
+            boolean allMatched = true;
+            for (Member base : cls.baseMeasures) {
+                if (!(base instanceof
+                        mondrian.rolap.RolapStoredMeasure))
+                {
+                    allMatched = false;
+                    break;
+                }
+                RolapStar.Measure starM =
+                    ((mondrian.rolap.RolapStoredMeasure) base)
+                        .getStarMeasure();
+                String al = starMeasureAliases.get(starM);
+                if (al == null) {
+                    // The calc depends on a base measure not present in
+                    // this segment load. Skip — the evaluator will
+                    // compute it from its own segment loads as usual.
+                    allMatched = false;
+                    break;
+                }
+                refs.put(base, al);
+            }
+            if (!allMatched) {
+                continue;
+            }
+            String calcAlias = "c" + (calcIdx++);
+            b.addComputedMeasure(
+                new PlannerRequest.ComputedMeasure(
+                    calcAlias, entry.expression, refs));
         }
 
         return b.build();
@@ -2472,6 +2530,86 @@ public final class CalcitePlannerAdapters {
             }
         }
         return pushed;
+    }
+
+    /**
+     * Task T.1 runtime hook: at MDX query start, walk the query's calc
+     * members, classify each via {@link ArithmeticCalcAnalyzer}, and
+     * register the pushable ones with {@link CalcPushdownRegistry} so
+     * {@link #fromSegmentLoad} can add them as {@link
+     * PlannerRequest.ComputedMeasure} entries on subsequent segment
+     * loads. No-op when the backend is not Calcite.
+     *
+     * <p>Clears any prior registry state before populating. Counters are
+     * ticked (pushed / rejected) as a side-effect so observability is
+     * accurate even for queries that never touch a segment load.
+     *
+     * <p>The caller (today: {@link mondrian.rolap.RolapResult}) is
+     * responsible for calling {@link CalcPushdownRegistry#clear()} in a
+     * finally block so state does not leak across queries on the same
+     * thread.
+     */
+    public static void registerCalcsFromQuery(
+        mondrian.olap.Query query,
+        Object execution)
+    {
+        CalcPushdownRegistry.clear();
+        CalcPushdownRegistry.clearExecution(execution);
+        if (query == null) {
+            return;
+        }
+        if (!MondrianBackend.isCurrentCalcite()) {
+            return;
+        }
+        mondrian.olap.Formula[] formulas = query.getFormulas();
+        if (formulas == null || formulas.length == 0) {
+            return;
+        }
+        java.util.List<CalcPushdownRegistry.Entry> entries =
+            new java.util.ArrayList<>();
+        for (mondrian.olap.Formula f : formulas) {
+            if (f == null || !f.isMember()) {
+                continue;
+            }
+            Member m = f.getMdxMember();
+            if (m == null || !m.isMeasure() || !m.isCalculated()) {
+                continue;
+            }
+            mondrian.olap.Exp exp = f.getExpression();
+            if (exp == null) {
+                continue;
+            }
+            ArithmeticCalcAnalyzer.Classification cls =
+                ArithmeticCalcAnalyzer.classify(
+                    exp, java.util.Collections.<Member>emptySet());
+            if (cls.isPushable()) {
+                CalcPushdownRegistry.onPushed();
+                entries.add(
+                    new CalcPushdownRegistry.Entry(m, exp, cls));
+            } else {
+                CalcPushdownRegistry.onRejected();
+            }
+        }
+        if (!entries.isEmpty()) {
+            // Register both the thread-local (so unit tests that poke
+            // the registry directly still see entries on the calling
+            // thread) and the Execution-keyed map (so cross-thread
+            // segment-load translation can reach the entries via
+            // Locus.peek().execution on a worker).
+            CalcPushdownRegistry.activate(entries);
+            if (execution != null) {
+                CalcPushdownRegistry.activateForExecution(
+                    execution, entries);
+            }
+        }
+    }
+
+    /** Overload for callers without an {@link mondrian.server.Execution}
+     *  handle — populates only the thread-local side of the registry. */
+    public static void registerCalcsFromQuery(
+        mondrian.olap.Query query)
+    {
+        registerCalcsFromQuery(query, null);
     }
 
     /** Reset the unsupported counters (test-only). */
