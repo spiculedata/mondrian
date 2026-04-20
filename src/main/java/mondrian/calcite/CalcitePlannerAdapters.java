@@ -150,20 +150,25 @@ public final class CalcitePlannerAdapters {
             throw new UnsupportedTranslation(
                 "fromTupleRead: empty levels list");
         }
-        // Narrow to NonEmptyCrossJoinConstraint for this iteration. The
-        // two sibling SetConstraint subclasses that extend the same class
-        // — RolapNativeTopCount$TopCountConstraint and
-        // RolapNativeFilter$FilterConstraint — need extra translation
-        // surface (TopCount needs the sort-measure projected; Filter
-        // needs a HAVING-like measure predicate). Both are deferred to
-        // later worktree-#2 tasks. We gate by class-name so we don't
-        // have to wire a reverse dependency onto RolapNative* here.
-        if (constraint instanceof RolapNativeSet.SetConstraint
-            && "mondrian.rolap.RolapNativeCrossJoin$NonEmptyCrossJoinConstraint"
-                .equals(constraint.getClass().getName()))
-        {
-            return translateSetConstraintTupleRead(
-                levels, (RolapNativeSet.SetConstraint) constraint);
+        // Handles NonEmptyCrossJoinConstraint (Task N) and
+        // TopCountConstraint (Task O). The remaining SetConstraint sibling
+        // — RolapNativeFilter$FilterConstraint — still throws because it
+        // needs a HAVING-like measure predicate (Task P). We gate by
+        // class-name for NECJ to avoid a reverse dependency on
+        // RolapNativeCrossJoin; TopCount dispatches via instanceof on the
+        // public TopCountConstraint class.
+        if (constraint instanceof RolapNativeSet.SetConstraint) {
+            String cls = constraint.getClass().getName();
+            boolean isNecj =
+                "mondrian.rolap.RolapNativeCrossJoin$NonEmptyCrossJoinConstraint"
+                    .equals(cls);
+            boolean isTopCount =
+                constraint instanceof
+                    mondrian.rolap.RolapNativeTopCount.TopCountConstraint;
+            if (isNecj || isTopCount) {
+                return translateSetConstraintTupleRead(
+                    levels, (RolapNativeSet.SetConstraint) constraint);
+            }
         }
         if (!(constraint instanceof DefaultTupleConstraint)) {
             throw new UnsupportedTranslation(
@@ -382,8 +387,26 @@ public final class CalcitePlannerAdapters {
             TargetShape shape = shapes[i];
             CrossJoinArg arg = args[i];
             emitNecjTargetProjections(b, projectedKeys, shape);
-            addNecjOrderBy(b, orderedKeys, shape);
             addCrossJoinArgFilter(b, shape, arg);
+        }
+
+        // TopCount-only: add the sort-measure projection + primary
+        // ORDER BY on that measure. Must happen after dim projections
+        // (so the measure renders AFTER group-by cols, matching the
+        // legacy SELECT layout) and BEFORE per-target ORDER BYs
+        // (which become tiebreakers). The JDBC setMaxRows on the
+        // statement trims to `topCount` rows — no SQL LIMIT needed.
+        if (constraint instanceof
+            mondrian.rolap.RolapNativeTopCount.TopCountConstraint)
+        {
+            addTopCountOrderByMeasure(
+                b,
+                (mondrian.rolap.RolapNativeTopCount.TopCountConstraint)
+                    constraint);
+        }
+
+        for (int i = 0; i < levels.size(); i++) {
+            addNecjOrderBy(b, orderedKeys, shapes[i]);
         }
 
         // Slicer contribution: any non-all, non-measure member in the
@@ -391,6 +414,117 @@ public final class CalcitePlannerAdapters {
         addSlicerFilters(b, evaluator, factTable, joinedAliases, args);
 
         return b.build();
+    }
+
+    /**
+     * Task O: translate the TopCount sort-measure expression. Accepts the
+     * narrow shape exercised by the goldens — a {@link mondrian.mdx.MemberExpr}
+     * whose member is a simple {@link mondrian.rolap.RolapStoredMeasure} with
+     * a real {@link mondrian.rolap.RolapSchema.PhysRealColumn} expression and
+     * one of {Sum, Count, Min, Max, Avg} as its aggregator. Anything else
+     * (calculated measures, level-column expressions, DistinctCount which
+     * needs COUNT DISTINCT wiring, non-real columns) throws
+     * {@link UnsupportedTranslation} so the shopping-list surface stays
+     * honest.
+     *
+     * <p>Emits:
+     * <ol>
+     *   <li>A {@link PlannerRequest.Measure} on {@code req.measures}. The
+     *       alias is a stable {@code "m0"} — the renderer's post-aggregate
+     *       reprojection places this AFTER the group-by columns in request
+     *       order so the overall SELECT layout matches legacy's (dim keys
+     *       first, then the sort measure).</li>
+     *   <li>An {@link PlannerRequest.OrderBy} on that measure alias with
+     *       direction taken from {@link RolapNativeTopCount.TopCountConstraint#isAscending()}.
+     *       This becomes the primary sort; per-target dim ORDER BYs are
+     *       appended afterwards as tiebreakers (matching legacy's order by
+     *       measure-direction, then ancestor-ASC, then leaf-key-ASC).</li>
+     * </ol>
+     */
+    private static void addTopCountOrderByMeasure(
+        PlannerRequest.Builder b,
+        mondrian.rolap.RolapNativeTopCount.TopCountConstraint constraint)
+    {
+        mondrian.olap.Exp orderByExpr = constraint.getOrderByExpr();
+        if (orderByExpr == null) {
+            // TopCount without an explicit sort expression (3-arg form
+            // elided). Goldens always carry the third arg; rejecting here
+            // keeps the surface honest.
+            throw new UnsupportedTranslation(
+                "fromTupleRead: TopCountConstraint has no orderBy expression "
+                + "(2-arg TopCount form not yet supported)");
+        }
+        if (!(orderByExpr instanceof mondrian.mdx.MemberExpr)) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: TopCountConstraint orderBy shape "
+                + orderByExpr.getClass().getName()
+                + " not yet supported (expected MemberExpr)");
+        }
+        mondrian.olap.Member member =
+            ((mondrian.mdx.MemberExpr) orderByExpr).getMember();
+        if (!(member instanceof mondrian.rolap.RolapStoredMeasure)) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: TopCountConstraint orderBy member "
+                + (member == null ? "null" : member.getClass().getName())
+                + " is not a RolapStoredMeasure (calculated measures and "
+                + "level columns not yet supported)");
+        }
+        mondrian.rolap.RolapStoredMeasure measure =
+            (mondrian.rolap.RolapStoredMeasure) member;
+        RolapSchema.PhysColumn expr = measure.getExpr();
+        if (!(expr instanceof RolapSchema.PhysRealColumn)) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: TopCountConstraint measure expression "
+                + (expr == null ? "null" : expr.getClass().getName())
+                + " is not a real column");
+        }
+        PlannerRequest.AggFn fn =
+            aggFnFor(measure.getAggregator());
+        if (fn == null) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: TopCountConstraint aggregator "
+                + measure.getAggregator().getName()
+                + " not yet supported");
+        }
+        String tableAlias =
+            expr.relation == null ? null : expr.relation.getAlias();
+        String colName = ((RolapSchema.PhysRealColumn) expr).name;
+        String alias = "m0";
+        boolean distinct =
+            measure.getAggregator() == RolapAggregator.DistinctCount;
+        b.addMeasure(
+            new PlannerRequest.Measure(
+                fn,
+                new PlannerRequest.Column(tableAlias, colName),
+                alias,
+                distinct));
+        b.addOrderBy(
+            new PlannerRequest.OrderBy(
+                new PlannerRequest.Column(null, alias),
+                constraint.isAscending()
+                    ? PlannerRequest.Order.ASC
+                    : PlannerRequest.Order.DESC));
+    }
+
+    private static PlannerRequest.AggFn aggFnFor(RolapAggregator agg) {
+        if (agg == RolapAggregator.Sum) {
+            return PlannerRequest.AggFn.SUM;
+        }
+        if (agg == RolapAggregator.Count
+            || agg == RolapAggregator.DistinctCount)
+        {
+            return PlannerRequest.AggFn.COUNT;
+        }
+        if (agg == RolapAggregator.Min) {
+            return PlannerRequest.AggFn.MIN;
+        }
+        if (agg == RolapAggregator.Max) {
+            return PlannerRequest.AggFn.MAX;
+        }
+        if (agg == RolapAggregator.Avg) {
+            return PlannerRequest.AggFn.AVG;
+        }
+        return null;
     }
 
     /**

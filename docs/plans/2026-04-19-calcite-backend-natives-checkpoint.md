@@ -1,4 +1,4 @@
-# Calcite Backend Natives — Checkpoint (Task N)
+# Calcite Backend Natives — Checkpoint (Tasks N + O)
 
 **Date:** 2026-04-19
 **Worktree:** `calcite-backend-natives`
@@ -199,11 +199,81 @@ pass column without any new shape being unblocked.
 
 ## Next tasks (ordered by unlock cardinality)
 
-1. **TopCountConstraint** — unlocks 3 queries
-   (`topcount`, `named-set`, `native-topcount-product-names`).
-   Needs the sort-measure added to SELECT + a LIMIT clause at render.
+1. ~~**TopCountConstraint**~~ — landed as Task O.
 2. **FilterConstraint** — unlocks 2 queries
    (`filter`, `native-filter-product-names`).
    Needs a HAVING-like predicate on the measure.
 3. **Level properties in NECJ projection** — unlocks `non-empty-rows`.
 4. **DescendantsConstraint** — unlocks `descendants`.
+
+---
+
+## Task O summary (2026-04-19)
+
+Extend the Task-N gate to accept
+`RolapNativeTopCount$TopCountConstraint` and translate the two extras
+it carries on top of the `SetConstraint` base:
+
+1. **Sort-measure projection.** The constraint's `orderByExpr` is a
+   `MemberExpr` whose member is (for the currently-supported shape) a
+   `RolapStoredMeasure` with a real fact-table column and one of
+   {Sum, Count, Min, Max, Avg, DistinctCount} as its aggregator.
+   Translated to a `PlannerRequest.Measure` with alias `m0`. The
+   renderer's post-aggregate reprojection (Task K fix) places it AFTER
+   the group-by columns so the SELECT layout matches legacy's shape:
+   dim keys first, sort measure last.
+2. **Primary ORDER BY.** Inserted BEFORE the per-target dim-key
+   ORDER BYs (which become tiebreakers), with direction taken from
+   `constraint.isAscending()`. TopCount → DESC, BottomCount → ASC.
+
+No `LIMIT` clause is emitted — Mondrian's `RolapNativeTopCount`
+sets `setMaxRows(count)` on the outer `SetEvaluator`, which propagates
+to `SqlStatement.execute` and becomes a JDBC
+`Statement.setMaxRows(count)` call. HSQLDB honours that via the
+driver, regardless of which SQL engine emitted the query. Confirmed
+by inspecting the legacy goldens: no `LIMIT` / `FETCH FIRST` present.
+
+Unsupported order-by shapes throw `UnsupportedTranslation` with the
+offending expression / member / column class in the message:
+
+- Non-`MemberExpr` (e.g. arithmetic, tuple, calculated expression).
+- `MemberExpr` over a non-stored measure (calculated measure).
+- Stored measure whose expression is a non-real `PhysColumn`
+  (`PhysCalcColumn`).
+- Aggregator outside the supported enum.
+
+### Dispatch gate
+
+Was: class-name equality check on `NonEmptyCrossJoinConstraint`.
+Now: `instanceof SetConstraint` + either NECJ class-name OR
+`instanceof TopCountConstraint`. TopCount dispatches via the actual
+type because its class was promoted from package-private to `public`
+in this task (file is scheduled for deletion in worktree #4, so the
+surface bump is transient).
+
+### Files changed
+
+| File | Delta |
+|------|-------|
+| `src/main/java/mondrian/calcite/CalcitePlannerAdapters.java`  | +150 / -12 |
+| `src/main/java/mondrian/rolap/RolapNativeTopCount.java`       | +18 / -1   |
+
+### Harness state
+
+| Run                                                                              | Result         |
+|----------------------------------------------------------------------------------|----------------|
+| `mvn -Pcalcite-harness -Dmondrian.backend=legacy -Dtest='Equivalence*Test' test` | **34/34 pass** |
+| `mvn -Pcalcite-harness                          -Dtest='Equivalence*Test' test` | **30/34 pass** (was 27/34) |
+
+Net +3 pass: `topcount`, `named-set`, `native-topcount-product-names`.
+
+### Post-Task-O first-throw bucket distribution
+
+| Count | First `UnsupportedTranslation` / signal |
+|-------|-----------------------------------------|
+| 2     | `fromTupleRead: RolapNativeFilter$FilterConstraint` |
+| 1     | `fromTupleRead: DescendantsConstraint` |
+| 1     | `types cardinality != column count` (non-empty-rows — level properties) |
+
+TopCount is cleared. FilterConstraint (Task P) is next, then the two
+non-constraint-shape blockers.

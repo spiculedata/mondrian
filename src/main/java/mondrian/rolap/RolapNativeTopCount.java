@@ -35,10 +35,27 @@ public class RolapNativeTopCount extends RolapNativeSet {
             MondrianProperties.instance().EnableNativeTopCount.get());
     }
 
-    static class TopCountConstraint extends SetConstraint {
+    public static class TopCountConstraint extends SetConstraint {
         Exp orderByExpr;
         boolean ascending;
         Integer topCount;
+
+        /** Exposed for the Calcite backend translator; the field is
+         *  otherwise private to this compilation unit. File is scheduled
+         *  for deletion in worktree #4. */
+        public Exp getOrderByExpr() {
+            return orderByExpr;
+        }
+
+        /** @see #getOrderByExpr() */
+        public boolean isAscending() {
+            return ascending;
+        }
+
+        /** @see #getOrderByExpr() */
+        public int getTopCount() {
+            return topCount;
+        }
 
         /**
          * Creates TopCountConstraint.
