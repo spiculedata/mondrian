@@ -93,6 +93,44 @@ public final class PlannerRequest {
         }
     }
 
+    /**
+     * OR-of-AND cross-column tuple filter. Expresses
+     * {@code (col0=v00 AND col1=v01) OR (col0=v10 AND col1=v11) OR ...}
+     * where every row is aligned to the shared {@link #columns} list.
+     * A single-column TupleFilter collapses to an IN-list at render time.
+     * Added for segment-load cross-column OR predicates (Task M).
+     */
+    public static final class TupleFilter {
+        public final List<Column> columns;
+        public final List<List<Object>> rows;
+        public TupleFilter(List<Column> columns, List<List<Object>> rows) {
+            if (columns == null || columns.isEmpty()) {
+                throw new IllegalArgumentException(
+                    "TupleFilter requires at least one column");
+            }
+            if (rows == null || rows.isEmpty()) {
+                throw new IllegalArgumentException(
+                    "TupleFilter requires at least one row");
+            }
+            List<Column> cols = List.copyOf(columns);
+            List<List<Object>> rs = new ArrayList<>(rows.size());
+            for (List<Object> row : rows) {
+                if (row.size() != cols.size()) {
+                    throw new IllegalArgumentException(
+                        "TupleFilter row arity " + row.size()
+                        + " != columns arity " + cols.size());
+                }
+                List<Object> copy = new ArrayList<>(row.size());
+                for (Object v : row) {
+                    copy.add(v);
+                }
+                rs.add(java.util.Collections.unmodifiableList(copy));
+            }
+            this.columns = cols;
+            this.rows = java.util.Collections.unmodifiableList(rs);
+        }
+    }
+
     public static final class OrderBy {
         public final Column column;
         public final Order direction;
@@ -158,6 +196,7 @@ public final class PlannerRequest {
     public final List<Measure> measures;
     public final List<Column> projections;
     public final List<Filter> filters;
+    public final List<TupleFilter> tupleFilters;
     public final List<OrderBy> orderBy;
     /** Row-level DISTINCT on projections. Only valid when not aggregating.
      *  Added for tuple-read / level-member dispatch (Task E). */
@@ -174,6 +213,7 @@ public final class PlannerRequest {
         this.measures = List.copyOf(b.measures);
         this.projections = List.copyOf(b.projections);
         this.filters = List.copyOf(b.filters);
+        this.tupleFilters = List.copyOf(b.tupleFilters);
         this.orderBy = List.copyOf(b.orderBy);
         this.distinct = b.distinct;
         this.universalFalse = b.universalFalse;
@@ -201,6 +241,7 @@ public final class PlannerRequest {
         private final List<Measure> measures = new ArrayList<>();
         private final List<Column> projections = new ArrayList<>();
         private final List<Filter> filters = new ArrayList<>();
+        private final List<TupleFilter> tupleFilters = new ArrayList<>();
         private final List<OrderBy> orderBy = new ArrayList<>();
         private boolean distinct;
         private boolean universalFalse;
@@ -220,6 +261,10 @@ public final class PlannerRequest {
             return this;
         }
         public Builder addFilter(Filter f) { filters.add(f); return this; }
+        public Builder addTupleFilter(TupleFilter f) {
+            tupleFilters.add(f);
+            return this;
+        }
         public Builder addOrderBy(OrderBy o) { orderBy.add(o); return this; }
         public Builder distinct(boolean d) { this.distinct = d; return this; }
         public Builder universalFalse(boolean f) {

@@ -304,6 +304,41 @@ public class CalciteSqlPlannerTest {
             hsqlSql, altSql);
     }
 
+    /** Task M: TupleFilter renders as an OR of ANDs across columns. */
+    @Test
+    public void tupleFilterEmitsOrOfAnds() {
+        CalciteSqlPlanner planner = plannerFor(HsqldbSqlDialect.DEFAULT);
+        PlannerRequest req = PlannerRequest.builder("sales_fact_1997")
+            .addJoin(new PlannerRequest.Join(
+                "time_by_day", "time_id", "time_id"))
+            .addJoin(new PlannerRequest.Join(
+                "customer", "customer_id", "customer_id"))
+            .addTupleFilter(new PlannerRequest.TupleFilter(
+                java.util.Arrays.asList(
+                    new PlannerRequest.Column("time_by_day", "the_year"),
+                    new PlannerRequest.Column("customer", "gender")),
+                java.util.Arrays.asList(
+                    java.util.Arrays.<Object>asList(1997, "F"),
+                    java.util.Arrays.<Object>asList(1998, "M"))))
+            .addGroupBy(new PlannerRequest.Column("time_by_day", "the_year"))
+            .addMeasure(new PlannerRequest.Measure(
+                PlannerRequest.AggFn.SUM,
+                new PlannerRequest.Column("sales_fact_1997", "unit_sales"),
+                "m"))
+            .build();
+        String sql = planner.plan(req);
+        assertNotNull(sql);
+        String lower = sql.toLowerCase();
+        assertTrue("expected OR in: " + sql, lower.contains(" or "));
+        assertTrue("expected AND in: " + sql, lower.contains(" and "));
+        assertTrue("expected 1997 in: " + sql, sql.contains("1997"));
+        assertTrue("expected 1998 in: " + sql, sql.contains("1998"));
+        assertTrue("expected 'F' in: " + sql,
+            sql.contains("'F'") || sql.contains("F"));
+        assertTrue("expected 'M' in: " + sql,
+            sql.contains("'M'") || sql.contains("M"));
+    }
+
     /**
      * Regression: Calcite's {@code Aggregate} normalises the group set to an
      * ImmutableBitSet, which re-orders group columns into the input-row's

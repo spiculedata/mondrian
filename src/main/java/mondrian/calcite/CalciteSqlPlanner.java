@@ -108,6 +108,9 @@ public final class CalciteSqlPlanner {
             for (PlannerRequest.Filter f : req.filters) {
                 b.filter(filterRex(b, f));
             }
+            for (PlannerRequest.TupleFilter tf : req.tupleFilters) {
+                b.filter(tupleFilterRex(b, tf));
+            }
         }
 
         if (req.isAggregation()) {
@@ -184,6 +187,33 @@ public final class CalciteSqlPlanner {
             ors.add(b.equals(col, b.literal(lit)));
         }
         return b.or(ors);
+    }
+
+    private static RexNode tupleFilterRex(
+        RelBuilder b, PlannerRequest.TupleFilter tf)
+    {
+        // Single-column tuple filter collapses to an OR-chain of equalities
+        // (identical in shape to a multi-literal Filter) so single-column
+        // OR reuses the same IN-list-like rendering.
+        if (tf.columns.size() == 1) {
+            RexNode col = b.field(tf.columns.get(0).name);
+            List<RexNode> ors = new ArrayList<>(tf.rows.size());
+            for (List<Object> row : tf.rows) {
+                ors.add(b.equals(col, b.literal(row.get(0))));
+            }
+            return ors.size() == 1 ? ors.get(0) : b.or(ors);
+        }
+        // Multi-column: OR of ANDs.
+        List<RexNode> ors = new ArrayList<>(tf.rows.size());
+        for (List<Object> row : tf.rows) {
+            List<RexNode> ands = new ArrayList<>(tf.columns.size());
+            for (int i = 0; i < tf.columns.size(); i++) {
+                RexNode col = b.field(tf.columns.get(i).name);
+                ands.add(b.equals(col, b.literal(row.get(i))));
+            }
+            ors.add(ands.size() == 1 ? ands.get(0) : b.and(ands));
+        }
+        return ors.size() == 1 ? ors.get(0) : b.or(ors);
     }
 
     private static RelBuilder.AggCall aggCall(

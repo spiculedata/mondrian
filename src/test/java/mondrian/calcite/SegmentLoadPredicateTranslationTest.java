@@ -222,7 +222,10 @@ public class SegmentLoadPredicateTranslationTest {
         assertEquals(2, req.filters.size());
     }
 
-    @Test public void orPredicateAcrossColumnsRejected() {
+    /** Task M: OR of bare ValueColumnPredicates on different columns is
+     *  still rejected (multi-column OR requires AndPredicate children so a
+     *  tuple can be formed). */
+    @Test public void orPredicateAcrossColumnsBareValuesRejected() {
         PredicateColumn pcYear = pcFor("time_by_day", "the_year");
         PredicateColumn pcGender = pcFor("customer", "gender");
         ValueColumnPredicate vYear = new ValueColumnPredicate(pcYear, 1997);
@@ -241,7 +244,7 @@ public class SegmentLoadPredicateTranslationTest {
                 "message: " + cause.getMessage(),
                 cause.getMessage().toLowerCase().contains("or")
                     && cause.getMessage().toLowerCase()
-                           .contains("across columns"));
+                           .contains("multi-column"));
         }
     }
 
@@ -253,6 +256,90 @@ public class SegmentLoadPredicateTranslationTest {
         ValueColumnPredicate v98 = new ValueColumnPredicate(pc, 1998);
         OrPredicate or = new OrPredicate(
             Arrays.<StarPredicate>asList(v97, v98));
+        PlannerRequest.Builder b = PlannerRequest.builder("sales_fact_1997")
+            .addProjection(
+                new PlannerRequest.Column("sales_fact_1997", "unit_sales"));
+        boolean isFalse = walkCompound(b, or);
+        assertFalse(isFalse);
+        PlannerRequest req = b.build();
+        assertEquals(1, req.filters.size());
+        assertEquals(PlannerRequest.Operator.IN, req.filters.get(0).op);
+        assertEquals(2, req.filters.get(0).literals.size());
+    }
+
+    /** Task M: OR of AndPredicates across two columns → TupleFilter. */
+    @Test public void orAcrossColumnsTranslatesToTupleFilter()
+        throws Exception
+    {
+        PredicateColumn pcYear = pcFor("time_by_day", "the_year");
+        PredicateColumn pcGender = pcFor("customer", "gender");
+        AndPredicate row1 = new AndPredicate(
+            Arrays.<StarPredicate>asList(
+                new ValueColumnPredicate(pcYear, 1997),
+                new ValueColumnPredicate(pcGender, "F")));
+        AndPredicate row2 = new AndPredicate(
+            Arrays.<StarPredicate>asList(
+                new ValueColumnPredicate(pcYear, 1998),
+                new ValueColumnPredicate(pcGender, "M")));
+        OrPredicate or = new OrPredicate(
+            Arrays.<StarPredicate>asList(row1, row2));
+        PlannerRequest.Builder b = PlannerRequest.builder("sales_fact_1997")
+            .addProjection(
+                new PlannerRequest.Column("sales_fact_1997", "unit_sales"));
+        boolean isFalse = walkCompound(b, or);
+        assertFalse(isFalse);
+        PlannerRequest req = b.build();
+        assertEquals(0, req.filters.size());
+        assertEquals(1, req.tupleFilters.size());
+        PlannerRequest.TupleFilter tf = req.tupleFilters.get(0);
+        assertEquals(2, tf.columns.size());
+        assertEquals(2, tf.rows.size());
+    }
+
+    /** Task M: OR of four AndPredicates, each with a single leaf on the
+     *  same column → single-column IN-list. */
+    @Test public void orSingleColumnCollapsesToIn()
+        throws Exception
+    {
+        PredicateColumn pc = pcFor("time_by_day", "the_year");
+        AndPredicate a97 = new AndPredicate(
+            Collections.<StarPredicate>singletonList(
+                new ValueColumnPredicate(pc, 1997)));
+        AndPredicate a98 = new AndPredicate(
+            Collections.<StarPredicate>singletonList(
+                new ValueColumnPredicate(pc, 1998)));
+        AndPredicate a99 = new AndPredicate(
+            Collections.<StarPredicate>singletonList(
+                new ValueColumnPredicate(pc, 1999)));
+        AndPredicate a00 = new AndPredicate(
+            Collections.<StarPredicate>singletonList(
+                new ValueColumnPredicate(pc, 2000)));
+        OrPredicate or = new OrPredicate(
+            Arrays.<StarPredicate>asList(a97, a98, a99, a00));
+        PlannerRequest.Builder b = PlannerRequest.builder("sales_fact_1997")
+            .addProjection(
+                new PlannerRequest.Column("sales_fact_1997", "unit_sales"));
+        boolean isFalse = walkCompound(b, or);
+        assertFalse(isFalse);
+        PlannerRequest req = b.build();
+        assertEquals(1, req.filters.size());
+        assertEquals(0, req.tupleFilters.size());
+        assertEquals(PlannerRequest.Operator.IN, req.filters.get(0).op);
+        assertEquals(4, req.filters.get(0).literals.size());
+    }
+
+    /** Task M: OR with mixed Value + single-leaf AND children on the same
+     *  column → IN-list. */
+    @Test public void orMixedChildrenTranslates()
+        throws Exception
+    {
+        PredicateColumn pc = pcFor("time_by_day", "the_year");
+        ValueColumnPredicate v97 = new ValueColumnPredicate(pc, 1997);
+        AndPredicate a98 = new AndPredicate(
+            Collections.<StarPredicate>singletonList(
+                new ValueColumnPredicate(pc, 1998)));
+        OrPredicate or = new OrPredicate(
+            Arrays.<StarPredicate>asList(v97, a98));
         PlannerRequest.Builder b = PlannerRequest.builder("sales_fact_1997")
             .addProjection(
                 new PlannerRequest.Column("sales_fact_1997", "unit_sales"));

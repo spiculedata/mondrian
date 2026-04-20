@@ -523,3 +523,50 @@ The `LEGACY_DRIFT` row on composite-key projection ordering has dropped
 off (no query fails on that signal any more). The dominant remaining
 blocker is the `TupleConstraint` family (8 queries across
 TopCount/Filter/CrossJoin/Descendants).
+
+## Task M — OR-across-columns segment-load predicate (TupleFilter)
+
+Extended `addCompoundFilters` walker in `CalcitePlannerAdapters` to
+accept cross-column `OrPredicate`s by recognising the OR-of-AndPredicate
+tuple-key shape. The translation emits a new `PlannerRequest.TupleFilter`
+(columns + rows) which `CalciteSqlPlanner` renders as an OR of ANDs:
+
+```
+(col_a = v1 AND col_b = v2) OR (col_a = v3 AND col_b = v4)
+```
+
+Single-column OR (already handled for bare `ValueColumnPredicate`
+children) now also collapses `AndPredicate`-with-one-leaf children to
+the same IN-list — fixing the `cols=1` failure bucket.
+
+Design choice: **Option (a) TupleFilter** (dedicated filter type), not
+a generic FilterExpr tree. The single shape exercised in Mondrian's
+segment-load corpus is OR-of-ANDs-over-a-shared-column-set; a full
+expression tree would ship more surface than is currently used.
+`Filter` (EQ/IN) stays untouched as the single-column path.
+
+### Harness
+
+| Run | Pass count |
+|-----|-----------|
+| Legacy (`-Dmondrian.backend=legacy`) | 34/34 |
+| Calcite (`-Pcalcite-harness`)        | **25/34** (was 23/34) |
+
+Net +2 passes; all four OR-across-columns queries now translate (zero
+`OrPredicate` throws in harness output). One of them surfaces a new
+`LEGACY_DRIFT` on `sqlExecution[6]` (row-count 1 vs 2) — i.e. the shape
+translates but the resulting cell-set differs from legacy on one query.
+The other two wins are clean.
+
+### Post-Task-M first-throw bucket distribution
+
+| Count | First `UnsupportedTranslation` / drift signal |
+|-------|-----------------------------------------------|
+| 3     | `fromTupleRead: non-default TupleConstraint … RolapNativeTopCount$TopCountConstraint` |
+| 2     | `fromTupleRead: non-default TupleConstraint … RolapNativeFilter$FilterConstraint` |
+| 2     | `fromTupleRead: non-default TupleConstraint … RolapNativeCrossJoin$NonEmptyCrossJoinConstraint` |
+| 1     | `fromTupleRead: non-default TupleConstraint … DescendantsConstraint` |
+| 1     | `LEGACY_DRIFT` on `sqlExecution[6]` (cell-set row-count 1 vs 2; post-TupleFilter shape) |
+
+The `OrPredicate` family (4 queries) has dropped off entirely. The
+dominant remaining blocker is the `TupleConstraint` family (8 queries).

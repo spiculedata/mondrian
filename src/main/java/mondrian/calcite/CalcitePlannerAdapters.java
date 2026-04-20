@@ -1031,35 +1031,7 @@ public final class CalcitePlannerAdapters {
             return anyFalse;
         }
         if (sp instanceof OrPredicate) {
-            OrPredicate or = (OrPredicate) sp;
-            // Single-column OR is semantically equivalent to a
-            // ListColumnPredicate; detect via the column bit-key.
-            List<PredicateColumn> cols = or.getColumnList();
-            if (cols.size() == 1
-                && allChildrenAreValueOnSameColumn(or, cols.get(0)))
-            {
-                PlannerRequest.Column col = columnForPredicate(cols.get(0));
-                List<Object> literals = new java.util.ArrayList<>();
-                for (StarPredicate child : or.getChildren()) {
-                    literals.add(
-                        ((ValueColumnPredicate) child).getValue());
-                }
-                if (literals.isEmpty()) {
-                    return true;
-                }
-                if (literals.size() == 1) {
-                    b.addFilter(
-                        new PlannerRequest.Filter(col, literals.get(0)));
-                } else {
-                    b.addFilter(
-                        new PlannerRequest.Filter(
-                            col, PlannerRequest.Operator.IN, literals));
-                }
-                return false;
-            }
-            throw new UnsupportedTranslation(
-                "fromSegmentLoad: OrPredicate across columns not yet "
-                + "supported (cols=" + cols.size() + ")");
+            return addOrPredicateFilter(b, (OrPredicate) sp);
         }
         if (sp instanceof MinusStarPredicate) {
             throw new UnsupportedTranslation(
@@ -1070,18 +1042,143 @@ public final class CalcitePlannerAdapters {
             + sp.getClass().getName());
     }
 
-    private static boolean allChildrenAreValueOnSameColumn(
-        OrPredicate or, PredicateColumn pc)
+    /**
+     * Translate an {@link OrPredicate} into one filter contribution.
+     *
+     * <p>Three supported child shapes:
+     * <ul>
+     *   <li>All children {@link ValueColumnPredicate} / single-leaf
+     *       {@link AndPredicate} over the <em>same</em> column →
+     *       collapse to IN-list (EQ when only one value).</li>
+     *   <li>All children {@link AndPredicate} over the same multi-column
+     *       column set → emit a {@link PlannerRequest.TupleFilter} with
+     *       one row per AND.</li>
+     *   <li>Mixed Value + single-leaf AND on the same column → promote
+     *       Values to single-leaf ANDs and collapse to IN-list.</li>
+     * </ul>
+     * Returns {@code true} on universalFalse (empty OR).
+     */
+    private static boolean addOrPredicateFilter(
+        PlannerRequest.Builder b, OrPredicate or)
     {
-        for (StarPredicate child : or.getChildren()) {
-            if (!(child instanceof ValueColumnPredicate)) {
-                return false;
-            }
-            if (((ValueColumnPredicate) child).getColumn() != pc) {
-                return false;
-            }
+        List<StarPredicate> children = or.getChildren();
+        if (children.isEmpty()) {
+            return true;
         }
-        return true;
+        List<PredicateColumn> cols = or.getColumnList();
+
+        // Single-column: collapse to IN-list regardless of whether each
+        // child is a ValueColumnPredicate or an AndPredicate-with-one-leaf.
+        if (cols.size() == 1) {
+            PredicateColumn pc = cols.get(0);
+            List<Object> literals = new java.util.ArrayList<>();
+            for (StarPredicate child : children) {
+                Object v = singleColumnValue(child, pc);
+                if (v == UNPROMOTABLE) {
+                    throw new UnsupportedTranslation(
+                        "fromSegmentLoad: OrPredicate single-column child "
+                        + "shape not supported: "
+                        + child.getClass().getName());
+                }
+                literals.add(v);
+            }
+            PlannerRequest.Column col = columnForPredicate(pc);
+            if (literals.size() == 1) {
+                b.addFilter(new PlannerRequest.Filter(col, literals.get(0)));
+            } else {
+                b.addFilter(
+                    new PlannerRequest.Filter(
+                        col, PlannerRequest.Operator.IN, literals));
+            }
+            return false;
+        }
+
+        // Multi-column: every child must be an AndPredicate whose leaves
+        // are ValueColumnPredicates covering the same column set.
+        List<PredicateColumn> orderedCols =
+            new java.util.ArrayList<>(cols);
+        List<List<Object>> rows = new java.util.ArrayList<>(children.size());
+        for (StarPredicate child : children) {
+            if (!(child instanceof AndPredicate)) {
+                throw new UnsupportedTranslation(
+                    "fromSegmentLoad: OrPredicate multi-column child is "
+                    + "not an AndPredicate: "
+                    + child.getClass().getName());
+            }
+            AndPredicate and = (AndPredicate) child;
+            java.util.Map<RolapSchema.PhysColumn, Object> byCol =
+                new java.util.HashMap<>();
+            for (StarPredicate leaf : and.getChildren()) {
+                if (!(leaf instanceof ValueColumnPredicate)) {
+                    throw new UnsupportedTranslation(
+                        "fromSegmentLoad: OrPredicate AND leaf is not a "
+                        + "ValueColumnPredicate: "
+                        + leaf.getClass().getName());
+                }
+                ValueColumnPredicate v = (ValueColumnPredicate) leaf;
+                byCol.put(v.getColumn().physColumn, v.getValue());
+            }
+            if (byCol.size() != orderedCols.size()) {
+                throw new UnsupportedTranslation(
+                    "fromSegmentLoad: OrPredicate AND child covers "
+                    + byCol.size() + " columns, expected "
+                    + orderedCols.size());
+            }
+            List<Object> row = new java.util.ArrayList<>(orderedCols.size());
+            for (PredicateColumn pc : orderedCols) {
+                if (!byCol.containsKey(pc.physColumn)) {
+                    throw new UnsupportedTranslation(
+                        "fromSegmentLoad: OrPredicate AND child missing "
+                        + "column " + pc.physColumn);
+                }
+                row.add(byCol.get(pc.physColumn));
+            }
+            rows.add(row);
+        }
+        List<PlannerRequest.Column> outCols =
+            new java.util.ArrayList<>(orderedCols.size());
+        for (PredicateColumn pc : orderedCols) {
+            outCols.add(columnForPredicate(pc));
+        }
+        b.addTupleFilter(new PlannerRequest.TupleFilter(outCols, rows));
+        return false;
+    }
+
+    /** Sentinel: child is not a promotable single-column equality. */
+    private static final Object UNPROMOTABLE = new Object();
+
+    /**
+     * If {@code child} is a single-column equality on {@code pc} (either a
+     * {@link ValueColumnPredicate} or an {@link AndPredicate} with exactly
+     * one {@link ValueColumnPredicate} leaf on the same column), returns
+     * the literal value. Otherwise returns {@link #UNPROMOTABLE}.
+     */
+    private static Object singleColumnValue(
+        StarPredicate child, PredicateColumn pc)
+    {
+        if (child instanceof ValueColumnPredicate) {
+            ValueColumnPredicate v = (ValueColumnPredicate) child;
+            if (v.getColumn().physColumn != pc.physColumn) {
+                return UNPROMOTABLE;
+            }
+            return v.getValue();
+        }
+        if (child instanceof AndPredicate) {
+            AndPredicate and = (AndPredicate) child;
+            if (and.getChildren().size() != 1) {
+                return UNPROMOTABLE;
+            }
+            StarPredicate leaf = and.getChildren().get(0);
+            if (!(leaf instanceof ValueColumnPredicate)) {
+                return UNPROMOTABLE;
+            }
+            ValueColumnPredicate v = (ValueColumnPredicate) leaf;
+            if (v.getColumn().physColumn != pc.physColumn) {
+                return UNPROMOTABLE;
+            }
+            return v.getValue();
+        }
+        return UNPROMOTABLE;
     }
 
     private static PlannerRequest.Column columnForPredicate(PredicateColumn pc)
