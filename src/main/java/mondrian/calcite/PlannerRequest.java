@@ -41,10 +41,20 @@ public final class PlannerRequest {
         public final AggFn fn;
         public final Column column;
         public final String alias;
+        /** Whether the aggregator applies DISTINCT (only honoured for
+         *  {@link AggFn#COUNT} today; rendered as {@code count(distinct x)}).
+         *  Added for cardinality-probe dispatch (Task C). */
+        public final boolean distinct;
         public Measure(AggFn fn, Column column, String alias) {
+            this(fn, column, alias, false);
+        }
+        public Measure(
+            AggFn fn, Column column, String alias, boolean distinct)
+        {
             this.fn = fn;
             this.column = column;
             this.alias = alias;
+            this.distinct = distinct;
         }
     }
 

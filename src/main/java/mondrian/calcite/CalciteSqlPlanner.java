@@ -124,14 +124,34 @@ public final class CalciteSqlPlanner {
         RexNode ref = b.field(m.column.name);
         switch (m.fn) {
         case SUM:
+            if (m.distinct) {
+                throw new UnsupportedTranslation(
+                    "CalciteSqlPlanner.aggCall: DISTINCT only supported for "
+                    + "COUNT (got SUM)");
+            }
             return b.sum(ref).as(m.alias);
         case COUNT:
-            return b.count(false, m.alias, ref);
+            return b.count(m.distinct, m.alias, ref);
         case MIN:
+            if (m.distinct) {
+                throw new UnsupportedTranslation(
+                    "CalciteSqlPlanner.aggCall: DISTINCT only supported for "
+                    + "COUNT (got MIN)");
+            }
             return b.min(ref).as(m.alias);
         case MAX:
+            if (m.distinct) {
+                throw new UnsupportedTranslation(
+                    "CalciteSqlPlanner.aggCall: DISTINCT only supported for "
+                    + "COUNT (got MAX)");
+            }
             return b.max(ref).as(m.alias);
         case AVG:
+            if (m.distinct) {
+                throw new UnsupportedTranslation(
+                    "CalciteSqlPlanner.aggCall: DISTINCT only supported for "
+                    + "COUNT (got AVG)");
+            }
             return b.avg(ref).as(m.alias);
         default:
             throw new IllegalStateException("unhandled AggFn: " + m.fn);

@@ -9,6 +9,13 @@
 */
 package mondrian.spi.impl;
 
+import mondrian.calcite.CalciteDialectMap;
+import mondrian.calcite.CalciteMondrianSchema;
+import mondrian.calcite.CalcitePlannerAdapters;
+import mondrian.calcite.CalciteSqlPlanner;
+import mondrian.calcite.MondrianBackend;
+import mondrian.calcite.PlannerRequest;
+import mondrian.calcite.UnsupportedTranslation;
 import mondrian.rolap.RolapUtil;
 import mondrian.rolap.SqlStatement;
 import mondrian.server.Execution;
@@ -16,8 +23,12 @@ import mondrian.server.Locus;
 import mondrian.spi.Dialect;
 import mondrian.spi.StatisticsProvider;
 
+import org.apache.log4j.Logger;
+
 import java.sql.*;
 import java.util.Arrays;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import javax.sql.DataSource;
 
 /**
@@ -25,6 +36,43 @@ import javax.sql.DataSource;
  * SQL queries to count rows and distinct values.
  */
 public class SqlStatisticsProvider implements StatisticsProvider {
+
+    private static final Logger LOGGER =
+        Logger.getLogger(SqlStatisticsProvider.class);
+
+    /**
+     * Per-DataSource cache of Calcite planners used by the cardinality-
+     * probe dispatch. Reflecting a JDBC schema opens connections and runs
+     * metadata queries, so we amortize it by keying on the {@link
+     * DataSource} identity — the same caching pattern as {@code
+     * SegmentLoader.plannerFor}.
+     */
+    private static final ConcurrentMap<DataSource, CalciteSqlPlanner>
+        PROBE_PLANNER_CACHE = new ConcurrentHashMap<>();
+
+    private static CalciteSqlPlanner plannerFor(
+        DataSource dataSource, Dialect dialect)
+    {
+        CalciteSqlPlanner cached = PROBE_PLANNER_CACHE.get(dataSource);
+        if (cached != null) {
+            return cached;
+        }
+        String product = dialect.getDatabaseProduct().name();
+        CalciteMondrianSchema schema =
+            new CalciteMondrianSchema(dataSource, "mondrian");
+        CalciteSqlPlanner planner =
+            new CalciteSqlPlanner(
+                schema, CalciteDialectMap.forProductName(product));
+        CalciteSqlPlanner existing =
+            PROBE_PLANNER_CACHE.putIfAbsent(dataSource, planner);
+        return existing != null ? existing : planner;
+    }
+
+    /** Test-only: drop the per-DataSource probe planner cache. */
+    public static void clearCalcitePlannerCache() {
+        PROBE_PLANNER_CACHE.clear();
+    }
+
     public int getTableCardinality(
         Dialect dialect,
         DataSource dataSource,
@@ -108,11 +156,54 @@ public class SqlStatisticsProvider implements StatisticsProvider {
         String column,
         Execution execution)
     {
-        final String sql =
+        String sql =
             generateColumnCardinalitySql(
                 dialect, schema, table, column);
         if (sql == null) {
             return -1;
+        }
+        // Task C dispatch: third SQL-origin seam. Under the Calcite backend
+        // we route cardinality probes through CalciteSqlPlanner via
+        // CalcitePlannerAdapters.fromCardinalityProbe. On
+        // UnsupportedTranslation we fall back to the legacy string so
+        // parity holds. Mirrors the SegmentLoader / SqlTupleReader wiring.
+        if (MondrianBackend.current().isCalcite()) {
+            try {
+                PlannerRequest req =
+                    CalcitePlannerAdapters.fromCardinalityProbe(
+                        schema, table, column);
+                CalciteSqlPlanner planner = plannerFor(dataSource, dialect);
+                String calciteSql = planner.plan(req);
+                if (Boolean.getBoolean("mondrian.calcite.trace")) {
+                    System.err.println(
+                        "[calcite-ok-probe] " + calciteSql);
+                }
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug(
+                        "Calcite backend: cardinality probe translated.\n"
+                        + "  legacy: " + sql + "\n"
+                        + "  calcite: " + calciteSql);
+                }
+                sql = calciteSql;
+            } catch (UnsupportedTranslation ex) {
+                if (Boolean.getBoolean("mondrian.calcite.trace")) {
+                    System.err.println(
+                        "[calcite-unsupported-probe] " + ex.getMessage());
+                }
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug(
+                        "Calcite backend: cardinality probe fell back to "
+                        + "legacy SQL: " + ex.getMessage());
+                }
+            } catch (RuntimeException ex) {
+                CalcitePlannerAdapters
+                    .recordCardinalityProbeFallback();
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug(
+                        "Calcite backend: probe planner threw; falling "
+                        + "back to legacy SQL: " + ex.getMessage(), ex);
+                }
+            }
         }
         SqlStatement stmt =
             RolapUtil.executeQuery(

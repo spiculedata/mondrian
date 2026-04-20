@@ -55,6 +55,8 @@ public final class CalcitePlannerAdapters {
         new AtomicLong();
     private static final AtomicLong TUPLE_READ_FALLBACK_COUNT =
         new AtomicLong();
+    private static final AtomicLong CARDINALITY_PROBE_FALLBACK_COUNT =
+        new AtomicLong();
 
     /**
      * Attempt to translate a tuple-read context into a
@@ -365,6 +367,66 @@ public final class CalcitePlannerAdapters {
             "fromSegmentLoad: unsupported aggregator " + agg.getName());
     }
 
+    /**
+     * Translate a single-column cardinality probe
+     * (<code>select count(distinct "col") from "schema"."table"</code>)
+     * into a {@link PlannerRequest}.
+     *
+     * <p>Third dispatch seam (Task C) — mirrors segment-load / tuple-read
+     * wiring. The probe shape is trivially translatable: one measure
+     * (COUNT DISTINCT), zero group-by, no filter, no join. We only reject
+     * shapes that would confuse the Calcite schema lookup — namely a
+     * non-empty DB-schema qualifier that doesn't match the one the
+     * per-DataSource {@link CalciteMondrianSchema} was built against.
+     *
+     * @param schema table's DB schema, or null for unqualified/default
+     * @param table table name (required)
+     * @param column column whose cardinality is being probed (required)
+     * @throws UnsupportedTranslation if the shape cannot be translated
+     */
+    public static PlannerRequest fromCardinalityProbe(
+        String schema, String table, String column)
+    {
+        try {
+            return translateCardinalityProbe(schema, table, column);
+        } catch (UnsupportedTranslation ex) {
+            CARDINALITY_PROBE_FALLBACK_COUNT.incrementAndGet();
+            recordFallback();
+            throw ex;
+        }
+    }
+
+    private static PlannerRequest translateCardinalityProbe(
+        String schema, String table, String column)
+    {
+        if (table == null || table.isEmpty()) {
+            throw new UnsupportedTranslation(
+                "fromCardinalityProbe: null/empty table");
+        }
+        if (column == null || column.isEmpty()) {
+            throw new UnsupportedTranslation(
+                "fromCardinalityProbe: null/empty column");
+        }
+        // Worktree-#1 schemas are unqualified (or resolved by the per-
+        // DataSource JdbcSchema reflection in CalciteMondrianSchema). If a
+        // non-empty DB-schema qualifier ever appears, bail — the legacy
+        // string handles it correctly, and probing the right resolution
+        // story for multi-schema setups belongs in a later worktree.
+        if (schema != null && !schema.isEmpty()) {
+            throw new UnsupportedTranslation(
+                "fromCardinalityProbe: qualified schema '" + schema
+                + "' not yet supported");
+        }
+        PlannerRequest.Builder b = PlannerRequest.builder(table);
+        b.addMeasure(
+            new PlannerRequest.Measure(
+                PlannerRequest.AggFn.COUNT,
+                new PlannerRequest.Column(null, column),
+                "c",
+                true));
+        return b.build();
+    }
+
     /** Increments the unsupported-fallback counter. */
     public static void recordFallback() {
         UNSUPPORTED_FALLBACK_COUNT.incrementAndGet();
@@ -376,6 +438,20 @@ public final class CalcitePlannerAdapters {
     public static void recordSegmentLoadFallback() {
         SEGMENT_LOAD_FALLBACK_COUNT.incrementAndGet();
         UNSUPPORTED_FALLBACK_COUNT.incrementAndGet();
+    }
+
+    /** Increments the cardinality-probe fallback counter (used when the
+     *  planner itself throws after a successful translation attempt,
+     *  so the caller falls back to legacy SQL). */
+    public static void recordCardinalityProbeFallback() {
+        CARDINALITY_PROBE_FALLBACK_COUNT.incrementAndGet();
+        UNSUPPORTED_FALLBACK_COUNT.incrementAndGet();
+    }
+
+    /** Count of fallbacks that happened on cardinality-probe dispatch
+     *  (fromCardinalityProbe). */
+    public static long cardinalityProbeFallbackCount() {
+        return CARDINALITY_PROBE_FALLBACK_COUNT.get();
     }
 
     /** Count of fallbacks that happened specifically on segment-load
@@ -400,6 +476,7 @@ public final class CalcitePlannerAdapters {
         UNSUPPORTED_FALLBACK_COUNT.set(0L);
         SEGMENT_LOAD_FALLBACK_COUNT.set(0L);
         TUPLE_READ_FALLBACK_COUNT.set(0L);
+        CARDINALITY_PROBE_FALLBACK_COUNT.set(0L);
     }
 }
 
