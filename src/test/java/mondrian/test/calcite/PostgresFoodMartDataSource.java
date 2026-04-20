@@ -54,6 +54,7 @@ public final class PostgresFoodMartDataSource {
         String user = resolve(USER_ENV, DEFAULT_USER);
         String password = resolve(PW_ENV, DEFAULT_PASSWORD);
 
+        DataSource raw;
         // Try PGSimpleDataSource reflectively to avoid a hard compile-time
         // dependency on the Postgres driver (driver is test-scope so the
         // main tree can still compile even if tests skip).
@@ -69,13 +70,61 @@ public final class PostgresFoodMartDataSource {
                 pgDsClass.getMethod("setPassword", String.class)
                     .invoke(ds, password);
             }
-            return (DataSource) ds;
+            raw = (DataSource) ds;
         } catch (ClassNotFoundException cnfe) {
-            // Fall back to a DriverManager shim.
-            return new DriverManagerShim(url, user, password);
+            raw = new DriverManagerShim(url, user, password);
         } catch (Exception e) {
             throw new RuntimeException(
                 "Failed to build PGSimpleDataSource for url=" + url, e);
+        }
+        // Mondrian's RolapConnection calls getConnection(user, pw) with
+        // HSQLDB-flavoured defaults (user="sa"). Override so the preset
+        // peer-auth credentials win for Postgres.
+        return new FixedCredentialsDataSource(raw);
+    }
+
+    /**
+     * Ignores any caller-supplied user/password and always returns the
+     * underlying DataSource's preset connection. Lets Mondrian's
+     * {@code JdbcUser=sa} defaults coexist with Postgres peer auth.
+     */
+    static final class FixedCredentialsDataSource implements DataSource {
+        private final DataSource delegate;
+        FixedCredentialsDataSource(DataSource delegate) {
+            this.delegate = delegate;
+        }
+        @Override public Connection getConnection() throws SQLException {
+            return delegate.getConnection();
+        }
+        @Override public Connection getConnection(String u, String p)
+            throws SQLException
+        {
+            return delegate.getConnection();
+        }
+        @Override public PrintWriter getLogWriter() throws SQLException {
+            return delegate.getLogWriter();
+        }
+        @Override public void setLogWriter(PrintWriter out) throws SQLException {
+            delegate.setLogWriter(out);
+        }
+        @Override public void setLoginTimeout(int s) throws SQLException {
+            delegate.setLoginTimeout(s);
+        }
+        @Override public int getLoginTimeout() throws SQLException {
+            return delegate.getLoginTimeout();
+        }
+        @Override public Logger getParentLogger()
+            throws SQLFeatureNotSupportedException
+        {
+            return delegate.getParentLogger();
+        }
+        @Override public <T> T unwrap(Class<T> iface) throws SQLException {
+            return delegate.unwrap(iface);
+        }
+        @Override public boolean isWrapperFor(Class<?> iface)
+            throws SQLException
+        {
+            return delegate.isWrapperFor(iface);
         }
     }
 
