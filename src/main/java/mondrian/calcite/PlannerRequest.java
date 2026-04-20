@@ -60,6 +60,40 @@ public final class PlannerRequest {
 
     public enum Operator { EQ, IN }
 
+    /** HAVING comparison operator set — the binary-compare subset the
+     *  corpus exercises for {@code RolapNativeFilter$FilterConstraint}.
+     *  Added for Task P. */
+    public enum Comparison { GT, LT, GE, LE, EQ, NE }
+
+    /**
+     * HAVING predicate: {@code <measure> <op> <literal>}. Used for
+     * native-filter translation where the MDX Filter expression is a
+     * single binary comparison of a stored measure against a numeric
+     * literal. The {@link #measure} is projected in the same aggregate
+     * as the GROUP BY so the renderer can filter on its alias, then
+     * dropped by the post-aggregate reprojection so the SELECT list
+     * remains {groupBy, userMeasures}. Added in Task P.
+     */
+    public static final class Having {
+        public final Measure measure;
+        public final Comparison op;
+        public final Object literal;
+        public Having(Measure measure, Comparison op, Object literal) {
+            if (measure == null) {
+                throw new IllegalArgumentException("measure is null");
+            }
+            if (op == null) {
+                throw new IllegalArgumentException("op is null");
+            }
+            if (literal == null) {
+                throw new IllegalArgumentException("literal is null");
+            }
+            this.measure = measure;
+            this.op = op;
+            this.literal = literal;
+        }
+    }
+
     public static final class Filter {
         public final Column column;
         public final Operator op;
@@ -197,6 +231,7 @@ public final class PlannerRequest {
     public final List<Column> projections;
     public final List<Filter> filters;
     public final List<TupleFilter> tupleFilters;
+    public final List<Having> havings;
     public final List<OrderBy> orderBy;
     /** Row-level DISTINCT on projections. Only valid when not aggregating.
      *  Added for tuple-read / level-member dispatch (Task E). */
@@ -214,6 +249,7 @@ public final class PlannerRequest {
         this.projections = List.copyOf(b.projections);
         this.filters = List.copyOf(b.filters);
         this.tupleFilters = List.copyOf(b.tupleFilters);
+        this.havings = List.copyOf(b.havings);
         this.orderBy = List.copyOf(b.orderBy);
         this.distinct = b.distinct;
         this.universalFalse = b.universalFalse;
@@ -242,6 +278,7 @@ public final class PlannerRequest {
         private final List<Column> projections = new ArrayList<>();
         private final List<Filter> filters = new ArrayList<>();
         private final List<TupleFilter> tupleFilters = new ArrayList<>();
+        private final List<Having> havings = new ArrayList<>();
         private final List<OrderBy> orderBy = new ArrayList<>();
         private boolean distinct;
         private boolean universalFalse;
@@ -263,6 +300,13 @@ public final class PlannerRequest {
         public Builder addFilter(Filter f) { filters.add(f); return this; }
         public Builder addTupleFilter(TupleFilter f) {
             tupleFilters.add(f);
+            return this;
+        }
+        public Builder addHaving(Having h) {
+            if (h == null) {
+                throw new IllegalArgumentException("having is null");
+            }
+            havings.add(h);
             return this;
         }
         public Builder addOrderBy(OrderBy o) { orderBy.add(o); return this; }

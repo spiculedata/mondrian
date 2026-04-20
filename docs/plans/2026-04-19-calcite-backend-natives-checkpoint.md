@@ -277,3 +277,74 @@ Net +3 pass: `topcount`, `named-set`, `native-topcount-product-names`.
 
 TopCount is cleared. FilterConstraint (Task P) is next, then the two
 non-constraint-shape blockers.
+
+---
+
+## Task P summary (2026-04-19)
+
+Extend the Task-N/O gate to accept
+`RolapNativeFilter$FilterConstraint` and translate its `filterExpr`
+into a HAVING predicate on the tuple-read aggregate.
+
+1. **`PlannerRequest.Having` value type** — carries a
+   `(Measure, Comparison, Object literal)` triple. The new
+   `Comparison` enum covers the six MDX infix comparators
+   (`>, <, >=, <=, =, <>`). Builder `.addHaving(h)` appends to a
+   new `havings` list (defaults empty).
+2. **`CalciteSqlPlanner` HAVING emission.** Each `Having` adds its
+   `measure` to the aggregate's `AggCall` list with a stable alias
+   (`h0..hN`), then a `b.filter()` applies the comparison to the
+   aggregate output. Calcite's `RelToSqlConverter` renders
+   `Filter-over-Aggregate` on dim-only projections as a proper
+   `HAVING` clause — verified against the filter.json golden. The
+   HAVING-only measures are dropped from the final SELECT by the
+   existing post-aggregate reprojection (which only re-exposes
+   `req.measures`, not the HAVING list).
+3. **`CalcitePlannerAdapters.addFilterHaving()`.** Narrow
+   translator: the filter expression must be a
+   `ResolvedFunCall` whose `FunDef.name` is one of the six
+   comparators, with exactly two args — LHS a `MemberExpr` over a
+   `RolapStoredMeasure` with a real `PhysRealColumn` + supported
+   aggregator (same gate as the TopCount sort-measure translator),
+   RHS a numeric `Literal`. Richer shapes (compound boolean,
+   arithmetic, calculated measures, two-measure comparisons) throw
+   `UnsupportedTranslation` with the concrete class name.
+
+### SQL comparison
+
+| Backend | HAVING rendering |
+|---------|------------------|
+| Legacy  | `having (sum("sales_fact_1997"."unit_sales") > 10000)` |
+| Calcite | `HAVING SUM("sales_fact_1997"."unit_sales") > 10000` |
+
+Semantically identical. SQL_DRIFT under the strict comparator is
+advisory per the worktree-#2 guardrails.
+
+### Files changed
+
+| File | Delta |
+|------|-------|
+| `src/main/java/mondrian/calcite/PlannerRequest.java`          | +40 / -0   |
+| `src/main/java/mondrian/calcite/CalciteSqlPlanner.java`       | +35 / -0   |
+| `src/main/java/mondrian/calcite/CalcitePlannerAdapters.java`  | +145 / -10 |
+| `src/main/java/mondrian/rolap/RolapNativeFilter.java`         | +9 / -1    |
+| `src/test/java/mondrian/calcite/CalciteSqlPlannerTest.java`   | +35 / -1   |
+
+### Harness state
+
+| Run                                                                              | Result         |
+|----------------------------------------------------------------------------------|----------------|
+| `mvn -Pcalcite-harness -Dmondrian.backend=legacy -Dtest='Equivalence*Test' test` | **34/34 pass** |
+| `mvn -Pcalcite-harness                          -Dtest='Equivalence*Test' test` | **32/34 pass** (was 30/34) |
+
+Net +2 pass: `filter`, `native-filter-product-names`.
+
+### Post-Task-P first-throw bucket distribution
+
+| Count | First `UnsupportedTranslation` / signal |
+|-------|-----------------------------------------|
+| 1     | `fromTupleRead: DescendantsConstraint` |
+| 1     | `types cardinality != column count` (non-empty-rows — level properties) |
+
+FilterConstraint is cleared. The two remaining blockers are both
+non-SetConstraint shapes.

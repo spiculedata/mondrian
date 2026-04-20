@@ -150,13 +150,11 @@ public final class CalcitePlannerAdapters {
             throw new UnsupportedTranslation(
                 "fromTupleRead: empty levels list");
         }
-        // Handles NonEmptyCrossJoinConstraint (Task N) and
-        // TopCountConstraint (Task O). The remaining SetConstraint sibling
-        // — RolapNativeFilter$FilterConstraint — still throws because it
-        // needs a HAVING-like measure predicate (Task P). We gate by
-        // class-name for NECJ to avoid a reverse dependency on
-        // RolapNativeCrossJoin; TopCount dispatches via instanceof on the
-        // public TopCountConstraint class.
+        // Handles NonEmptyCrossJoinConstraint (Task N),
+        // TopCountConstraint (Task O), and FilterConstraint (Task P).
+        // We gate by class-name for NECJ to avoid a reverse dependency on
+        // RolapNativeCrossJoin; TopCount and Filter dispatch via instanceof
+        // on their respective public inner classes.
         if (constraint instanceof RolapNativeSet.SetConstraint) {
             String cls = constraint.getClass().getName();
             boolean isNecj =
@@ -165,7 +163,10 @@ public final class CalcitePlannerAdapters {
             boolean isTopCount =
                 constraint instanceof
                     mondrian.rolap.RolapNativeTopCount.TopCountConstraint;
-            if (isNecj || isTopCount) {
+            boolean isFilter =
+                constraint instanceof
+                    mondrian.rolap.RolapNativeFilter.FilterConstraint;
+            if (isNecj || isTopCount || isFilter) {
                 return translateSetConstraintTupleRead(
                     levels, (RolapNativeSet.SetConstraint) constraint);
             }
@@ -405,6 +406,18 @@ public final class CalcitePlannerAdapters {
                     constraint);
         }
 
+        // FilterConstraint: translate filterExpr into a HAVING predicate
+        // on the tuple-read aggregate. See addFilterHaving() for the
+        // MDX shapes accepted.
+        if (constraint instanceof
+            mondrian.rolap.RolapNativeFilter.FilterConstraint)
+        {
+            addFilterHaving(
+                b,
+                (mondrian.rolap.RolapNativeFilter.FilterConstraint)
+                    constraint);
+        }
+
         for (int i = 0; i < levels.size(); i++) {
             addNecjOrderBy(b, orderedKeys, shapes[i]);
         }
@@ -504,6 +517,147 @@ public final class CalcitePlannerAdapters {
                 constraint.isAscending()
                     ? PlannerRequest.Order.ASC
                     : PlannerRequest.Order.DESC));
+    }
+
+    /**
+     * Task P: translate a {@link mondrian.rolap.RolapNativeFilter.FilterConstraint}'s
+     * filter expression into a {@link PlannerRequest.Having} predicate.
+     *
+     * <p>Narrow supported shape — the full corpus exercises exactly this:
+     * a {@link mondrian.mdx.ResolvedFunCall} whose {@link mondrian.olap.FunDef}
+     * name is one of {@code >, <, >=, <=, =, <>} (the infix binary
+     * comparators), with two args:
+     * <ol>
+     *   <li>A {@link mondrian.mdx.MemberExpr} resolving to a
+     *       {@link mondrian.rolap.RolapStoredMeasure} with a real
+     *       {@link mondrian.rolap.RolapSchema.PhysRealColumn} expression
+     *       and one of {Sum, Count, Min, Max, Avg, DistinctCount} as its
+     *       aggregator — same constraints as the TopCount sort-measure
+     *       translator (Task O).</li>
+     *   <li>A {@link mondrian.olap.Literal} whose value is a {@link Number}.</li>
+     * </ol>
+     *
+     * <p>Richer MDX filter predicates — compound boolean ({@code AND},
+     * {@code OR}, {@code NOT}), arithmetic on either side, {@code IsEmpty},
+     * calculated measures, two-measure comparisons — throw
+     * {@link UnsupportedTranslation} with the offending expression's
+     * concrete class name so the shopping-list surface stays honest.
+     */
+    private static void addFilterHaving(
+        PlannerRequest.Builder b,
+        mondrian.rolap.RolapNativeFilter.FilterConstraint constraint)
+    {
+        mondrian.olap.Exp filterExpr = constraint.getFilterExpr();
+        if (filterExpr == null) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: FilterConstraint has no filter expression");
+        }
+        if (!(filterExpr instanceof mondrian.mdx.ResolvedFunCall)) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: FilterConstraint filter expression "
+                + filterExpr.getClass().getName()
+                + " not yet supported (expected ResolvedFunCall binary "
+                + "comparison)");
+        }
+        mondrian.mdx.ResolvedFunCall call =
+            (mondrian.mdx.ResolvedFunCall) filterExpr;
+        String opName = call.getFunDef().getName();
+        PlannerRequest.Comparison cmp = comparisonFor(opName);
+        if (cmp == null) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: FilterConstraint operator '" + opName
+                + "' not yet supported (expected one of >, <, >=, <=, "
+                + "=, <>)");
+        }
+        mondrian.olap.Exp[] args = call.getArgs();
+        if (args.length != 2) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: FilterConstraint '" + opName
+                + "' arity " + args.length + " not yet supported "
+                + "(expected 2)");
+        }
+        // Left side: measure reference.
+        if (!(args[0] instanceof mondrian.mdx.MemberExpr)) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: FilterConstraint lhs shape "
+                + args[0].getClass().getName()
+                + " not yet supported (expected MemberExpr over a "
+                + "stored measure)");
+        }
+        mondrian.olap.Member member =
+            ((mondrian.mdx.MemberExpr) args[0]).getMember();
+        if (!(member instanceof mondrian.rolap.RolapStoredMeasure)) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: FilterConstraint lhs member "
+                + (member == null ? "null" : member.getClass().getName())
+                + " is not a RolapStoredMeasure (calculated measures not "
+                + "yet supported)");
+        }
+        mondrian.rolap.RolapStoredMeasure measure =
+            (mondrian.rolap.RolapStoredMeasure) member;
+        RolapSchema.PhysColumn expr = measure.getExpr();
+        if (!(expr instanceof RolapSchema.PhysRealColumn)) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: FilterConstraint lhs measure expression "
+                + (expr == null ? "null" : expr.getClass().getName())
+                + " is not a real column");
+        }
+        PlannerRequest.AggFn fn = aggFnFor(measure.getAggregator());
+        if (fn == null) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: FilterConstraint lhs aggregator "
+                + measure.getAggregator().getName() + " not yet supported");
+        }
+
+        // Right side: numeric literal.
+        if (!(args[1] instanceof mondrian.olap.Literal)) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: FilterConstraint rhs shape "
+                + args[1].getClass().getName()
+                + " not yet supported (expected numeric Literal)");
+        }
+        Object litValue = ((mondrian.olap.Literal) args[1]).getValue();
+        if (!(litValue instanceof Number)) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: FilterConstraint rhs literal value "
+                + (litValue == null ? "null" : litValue.getClass().getName())
+                + " is not a Number");
+        }
+
+        String tableAlias =
+            expr.relation == null ? null : expr.relation.getAlias();
+        String colName = ((RolapSchema.PhysRealColumn) expr).name;
+        boolean distinct =
+            measure.getAggregator() == RolapAggregator.DistinctCount;
+        PlannerRequest.Measure havingMeasure =
+            new PlannerRequest.Measure(
+                fn,
+                new PlannerRequest.Column(tableAlias, colName),
+                "h0",
+                distinct);
+        b.addHaving(new PlannerRequest.Having(havingMeasure, cmp, litValue));
+    }
+
+    private static PlannerRequest.Comparison comparisonFor(String op) {
+        if (">".equals(op)) {
+            return PlannerRequest.Comparison.GT;
+        }
+        if ("<".equals(op)) {
+            return PlannerRequest.Comparison.LT;
+        }
+        if (">=".equals(op)) {
+            return PlannerRequest.Comparison.GE;
+        }
+        if ("<=".equals(op)) {
+            return PlannerRequest.Comparison.LE;
+        }
+        if ("=".equals(op)) {
+            return PlannerRequest.Comparison.EQ;
+        }
+        if ("<>".equals(op)) {
+            return PlannerRequest.Comparison.NE;
+        }
+        return null;
     }
 
     private static PlannerRequest.AggFn aggFnFor(RolapAggregator agg) {

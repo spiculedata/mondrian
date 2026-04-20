@@ -122,7 +122,27 @@ public final class CalciteSqlPlanner {
             for (PlannerRequest.Measure m : req.measures) {
                 aggs.add(aggCall(b, m));
             }
+            // HAVING predicates ride along in the aggregate so their
+            // measure alias is resolvable by the subsequent filter()
+            // call. Distinct aliases are guaranteed by the builder —
+            // user measures already have stable aliases, and HAVING
+            // translation in CalcitePlannerAdapters emits h0..hN.
+            // Measures that pre-exist the aggregate by matching
+            // fn+column+distinct+alias are NOT deduped; the
+            // post-aggregate reproject drops the HAVING-only ones
+            // by name, preserving the user's SELECT layout.
+            for (PlannerRequest.Having h : req.havings) {
+                aggs.add(aggCall(b, h.measure));
+            }
             b.aggregate(b.groupKey(keys), aggs);
+
+            // HAVING: filter on the aggregate's output columns. Calcite
+            // recognises a Filter immediately above an Aggregate whose
+            // predicate references aggregate-output columns and unparses
+            // it as a HAVING clause.
+            for (PlannerRequest.Having h : req.havings) {
+                b.filter(havingRex(b, h));
+            }
 
             // Calcite's Aggregate normalises the group set to an
             // ImmutableBitSet, which re-orders group columns into the
@@ -133,7 +153,8 @@ public final class CalciteSqlPlanner {
             // reordered SELECT assigns axis values to the wrong column and
             // cell lookups miss. Re-project to force the intended order:
             // groupBy columns in request order, followed by measures in
-            // request order.
+            // request order. HAVING-only measures (h0..hN) are dropped
+            // from the final SELECT so they don't leak out.
             List<RexNode> restored = new ArrayList<>(
                 req.groupBy.size() + req.measures.size());
             List<String> restoredAliases = new ArrayList<>(
@@ -228,6 +249,24 @@ public final class CalciteSqlPlanner {
             ors.add(ands.size() == 1 ? ands.get(0) : b.and(ands));
         }
         return ors.size() == 1 ? ors.get(0) : b.or(ors);
+    }
+
+    private static RexNode havingRex(
+        RelBuilder b, PlannerRequest.Having h)
+    {
+        RexNode col = b.field(h.measure.alias);
+        RexNode lit = b.literal(h.literal);
+        switch (h.op) {
+        case GT: return b.greaterThan(col, lit);
+        case LT: return b.lessThan(col, lit);
+        case GE: return b.greaterThanOrEqual(col, lit);
+        case LE: return b.lessThanOrEqual(col, lit);
+        case EQ: return b.equals(col, lit);
+        case NE: return b.not(b.equals(col, lit));
+        default:
+            throw new IllegalStateException(
+                "unhandled Having op: " + h.op);
+        }
     }
 
     private static RelBuilder.AggCall aggCall(

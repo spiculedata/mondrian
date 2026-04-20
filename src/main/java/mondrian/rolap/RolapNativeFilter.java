@@ -39,8 +39,15 @@ public class RolapNativeFilter extends RolapNativeSet {
             MondrianProperties.instance().EnableNativeFilter.get());
     }
 
-    static class FilterConstraint extends SetConstraint {
+    public static class FilterConstraint extends SetConstraint {
         Exp filterExpr;
+
+        /** Exposed for the Calcite backend translator; the field is
+         *  otherwise private to this compilation unit. File is scheduled
+         *  for deletion in worktree #4. */
+        public Exp getFilterExpr() {
+            return filterExpr;
+        }
 
         /**
          * Creates a FilterConstraint.

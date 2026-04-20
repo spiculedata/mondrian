@@ -446,6 +446,41 @@ public class CalciteSqlPlannerTest {
             + "marital_status; got:\n" + sql,
             iGender < iMarital);
     }
+
+    @Test
+    public void filterExpressionEmitsHavingClause() {
+        CalciteSqlPlanner planner = plannerFor(HsqldbSqlDialect.DEFAULT);
+        // Filter.json shape: GROUP BY dim cols only (no user measures),
+        // HAVING on SUM(unit_sales).
+        PlannerRequest.Measure havingMeasure = new PlannerRequest.Measure(
+            PlannerRequest.AggFn.SUM,
+            new PlannerRequest.Column("sales_fact_1997", "unit_sales"),
+            "h0");
+        PlannerRequest req = PlannerRequest.builder("sales_fact_1997")
+            .addJoin(new PlannerRequest.Join(
+                "time_by_day", "time_id", "time_id"))
+            .addGroupBy(
+                new PlannerRequest.Column("time_by_day", "the_year"))
+            .addHaving(new PlannerRequest.Having(
+                havingMeasure, PlannerRequest.Comparison.GT, 10000))
+            .build();
+        String sql = planner.plan(req);
+        assertNotNull(sql);
+        String lower = sql.toLowerCase();
+        assertTrue(
+            "expected HAVING clause in: " + sql,
+            lower.contains("having"));
+        assertTrue(
+            "expected 10000 literal in HAVING: " + sql,
+            sql.contains("10000"));
+        assertTrue(
+            "expected GROUP BY in: " + sql, lower.contains("group by"));
+        // The h0 alias is HAVING-only and must NOT leak into the
+        // final SELECT — the post-aggregate reproject drops it.
+        assertFalse(
+            "HAVING-only alias h0 must not appear in SELECT: " + sql,
+            lower.contains("\"h0\"") || lower.contains(" as h0"));
+    }
 }
 
 // End CalciteSqlPlannerTest.java
