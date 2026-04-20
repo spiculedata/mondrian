@@ -1,0 +1,40 @@
+{
+  "mdx" : "select {[Measures].[Unit Sales]} on columns,\n  {[Time].[1997].[Q1], [Time].[1997].[Q2], [Time].[1997].[Q3], [Time].[1997].[Q4]} on rows\nfrom Sales",
+  "cellSet" : "Axis #0:\n{}\nAxis #1:\n{[Measures].[Unit Sales]}\nAxis #2:\n{[Time].[Time].[1997].[Q1]}\n{[Time].[Time].[1997].[Q2]}\n{[Time].[Time].[1997].[Q3]}\n{[Time].[Time].[1997].[Q4]}\nRow #0: 66,291\nRow #1: 62,610\nRow #2: 65,848\nRow #3: 72,024\n",
+  "sqlExecutions" : [ {
+    "seq" : 0,
+    "sql" : "select \"time_by_day\".\"quarter\" as \"c0\", \"time_by_day\".\"the_year\" as \"c1\" from \"time_by_day\" as \"time_by_day\" where (\"time_by_day\".\"the_year\" = 1997) and UPPER(\"time_by_day\".\"quarter\") = UPPER('Q1') group by \"time_by_day\".\"quarter\", \"time_by_day\".\"the_year\" order by CASE WHEN \"time_by_day\".\"quarter\" IS NULL THEN 0 ELSE 1 END, \"time_by_day\".\"quarter\" ASC",
+    "rowCount" : 1,
+    "checksum" : "sha256:2f54178ce05621467ea96a2871014e9e642d9e108c5a609cb6f349b4549eecee"
+  }, {
+    "seq" : 1,
+    "sql" : "select \"time_by_day\".\"quarter\" as \"c0\", \"time_by_day\".\"the_year\" as \"c1\" from \"time_by_day\" as \"time_by_day\" where (\"time_by_day\".\"the_year\" = 1997) and UPPER(\"time_by_day\".\"quarter\") = UPPER('Q2') group by \"time_by_day\".\"quarter\", \"time_by_day\".\"the_year\" order by CASE WHEN \"time_by_day\".\"quarter\" IS NULL THEN 0 ELSE 1 END, \"time_by_day\".\"quarter\" ASC",
+    "rowCount" : 1,
+    "checksum" : "sha256:db891d7b7e706b1b4534a68875922580fb5b43eb541593c2bcb2b72bbd91e9f0"
+  }, {
+    "seq" : 2,
+    "sql" : "select \"time_by_day\".\"quarter\" as \"c0\", \"time_by_day\".\"the_year\" as \"c1\" from \"time_by_day\" as \"time_by_day\" where (\"time_by_day\".\"the_year\" = 1997) and UPPER(\"time_by_day\".\"quarter\") = UPPER('Q3') group by \"time_by_day\".\"quarter\", \"time_by_day\".\"the_year\" order by CASE WHEN \"time_by_day\".\"quarter\" IS NULL THEN 0 ELSE 1 END, \"time_by_day\".\"quarter\" ASC",
+    "rowCount" : 1,
+    "checksum" : "sha256:d3094d80089d393ff386044e0c463f645abb62f3cf013d641ab11d9e4fff3fc8"
+  }, {
+    "seq" : 3,
+    "sql" : "select \"time_by_day\".\"quarter\" as \"c0\", \"time_by_day\".\"the_year\" as \"c1\" from \"time_by_day\" as \"time_by_day\" where (\"time_by_day\".\"the_year\" = 1997) and UPPER(\"time_by_day\".\"quarter\") = UPPER('Q4') group by \"time_by_day\".\"quarter\", \"time_by_day\".\"the_year\" order by CASE WHEN \"time_by_day\".\"quarter\" IS NULL THEN 0 ELSE 1 END, \"time_by_day\".\"quarter\" ASC",
+    "rowCount" : 1,
+    "checksum" : "sha256:e0951ddd862ed153bd062204fc3d2285ee5718c89396fc73c5cfebc5b95b86db"
+  }, {
+    "seq" : 4,
+    "sql" : "select count(distinct \"quarter\") from \"time_by_day\"",
+    "rowCount" : 1,
+    "checksum" : "sha256:527778acb6ad1ce1601b64ecacb5e9db68199ab9b6ed3e2b64b3747632d91c94"
+  }, {
+    "seq" : 5,
+    "sql" : "select count(distinct \"the_year\") from \"time_by_day\"",
+    "rowCount" : 1,
+    "checksum" : "sha256:d95838638b57fb04835fc9103a8a6f4d724435aad81507e74d5cdb2ff57f7d77"
+  }, {
+    "seq" : 6,
+    "sql" : "select \"time_by_day\".\"the_year\" as \"c0\", \"time_by_day\".\"quarter\" as \"c1\", sum(\"sales_fact_1997\".\"unit_sales\") as \"m0\" from \"sales_fact_1997\" as \"sales_fact_1997\", \"time_by_day\" as \"time_by_day\" where \"time_by_day\".\"the_year\" = 1997 and \"sales_fact_1997\".\"time_id\" = \"time_by_day\".\"time_id\" group by \"time_by_day\".\"the_year\", \"time_by_day\".\"quarter\"",
+    "rowCount" : 4,
+    "checksum" : "sha256:ecdc672eee8db06824b3bb5eebd7d18ca91c9ccf561aa608583fde495f231cfa"
+  } ]
+}

@@ -1,0 +1,30 @@
+{
+  "mdx" : "with member [Measures].[Store Profit Rate] as '([Measures].[Store Sales]-[Measures].[Store Cost])/[Measures].[Store Cost]', format = '#.00%'\nselect\n  {[Measures].[Store Cost],   [Measures].[Store Sales],   [Measures].[Store Profit Rate]} on columns,\n  Order([Product].[Product Department].members, [Measures].[Store Profit Rate], BDESC) on rows\nfrom Sales\nwhere ([Time].[1997])",
+  "cellSet" : "Axis #0:\n{[Time].[Time].[1997]}\nAxis #1:\n{[Measures].[Store Cost]}\n{[Measures].[Store Sales]}\n{[Measures].[Store Profit Rate]}\nAxis #2:\n{[Product].[Products].[Food].[Breakfast Foods]}\n{[Product].[Products].[Non-Consumable].[Carousel]}\n{[Product].[Products].[Food].[Canned Products]}\n{[Product].[Products].[Food].[Baking Goods]}\n{[Product].[Products].[Drink].[Alcoholic Beverages]}\n{[Product].[Products].[Non-Consumable].[Health and Hygiene]}\n{[Product].[Products].[Food].[Snack Foods]}\n{[Product].[Products].[Food].[Baked Goods]}\n{[Product].[Products].[Drink].[Beverages]}\n{[Product].[Products].[Food].[Frozen Foods]}\n{[Product].[Products].[Non-Consumable].[Periodicals]}\n{[Product].[Products].[Food].[Produce]}\n{[Product].[Products].[Food].[Seafood]}\n{[Product].[Products].[Food].[Deli]}\n{[Product].[Products].[Food].[Meat]}\n{[Product].[Products].[Food].[Canned Foods]}\n{[Product].[Products].[Non-Consumable].[Household]}\n{[Product].[Products].[Food].[Starchy Foods]}\n{[Product].[Products].[Food].[Eggs]}\n{[Product].[Products].[Food].[Snacks]}\n{[Product].[Products].[Food].[Dairy]}\n{[Product].[Products].[Drink].[Dairy]}\n{[Product].[Products].[Non-Consumable].[Checkout]}\nRow #0: 2,756.80\nRow #0: 6,941.46\nRow #0: 151.79%\nRow #1: 595.97\nRow #1: 1,500.11\nRow #1: 151.71%\nRow #2: 1,317.13\nRow #2: 3,314.52\nRow #2: 151.65%\nRow #3: 15,370.61\nRow #3: 38,670.41\nRow #3: 151.59%\nRow #4: 5,576.79\nRow #4: 14,029.08\nRow #4: 151.56%\nRow #5: 12,972.99\nRow #5: 32,571.86\nRow #5: 151.07%\nRow #6: 26,963.34\nRow #6: 67,609.82\nRow #6: 150.75%\nRow #7: 6,564.09\nRow #7: 16,455.43\nRow #7: 150.69%\nRow #8: 11,069.53\nRow #8: 27,748.53\nRow #8: 150.67%\nRow #9: 22,030.66\nRow #9: 55,207.50\nRow #9: 150.59%\nRow #10: 3,614.55\nRow #10: 9,056.76\nRow #10: 150.56%\nRow #11: 32,831.33\nRow #11: 82,248.42\nRow #11: 150.52%\nRow #12: 1,520.70\nRow #12: 3,809.14\nRow #12: 150.49%\nRow #13: 10,108.87\nRow #13: 25,318.93\nRow #13: 150.46%\nRow #14: 1,465.42\nRow #14: 3,669.89\nRow #14: 150.43%\nRow #15: 15,894.53\nRow #15: 39,774.34\nRow #15: 150.24%\nRow #16: 24,170.73\nRow #16: 60,469.89\nRow #16: 150.18%\nRow #17: 4,705.91\nRow #17: 11,756.07\nRow #17: 149.82%\nRow #18: 3,684.90\nRow #18: 9,200.76\nRow #18: 149.69%\nRow #19: 5,827.58\nRow #19: 14,550.05\nRow #19: 149.68%\nRow #20: 12,228.85\nRow #20: 30,508.85\nRow #20: 149.48%\nRow #21: 2,830.92\nRow #21: 7,058.60\nRow #21: 149.34%\nRow #22: 1,525.04\nRow #22: 3,767.71\nRow #22: 147.06%\n",
+  "sqlExecutions" : [ {
+    "seq" : 0,
+    "sql" : "select \"product_class\".\"product_family\" as \"c0\", \"product_class\".\"product_department\" as \"c1\" from \"product\" as \"product\", \"product_class\" as \"product_class\" where \"product\".\"product_class_id\" = \"product_class\".\"product_class_id\" group by \"product_class\".\"product_family\", \"product_class\".\"product_department\" order by CASE WHEN \"product_class\".\"product_family\" IS NULL THEN 1 ELSE 0 END, \"product_class\".\"product_family\" ASC, CASE WHEN \"product_class\".\"product_department\" IS NULL THEN 1 ELSE 0 END, \"product_class\".\"product_department\" ASC",
+    "rowCount" : 23,
+    "checksum" : "sha256:68faeca1f03ffe3ed7073c394d2a62a18b6253a91afb3e08a7c94b0ce88adc12"
+  }, {
+    "seq" : 1,
+    "sql" : "select count(distinct \"product_family\") from \"product_class\"",
+    "rowCount" : 1,
+    "checksum" : "sha256:8ddce159f92f86d0d74b632d2394cb611ec46e296a7bbeef160140253ff2d286"
+  }, {
+    "seq" : 2,
+    "sql" : "select count(distinct \"product_department\") from \"product_class\"",
+    "rowCount" : 1,
+    "checksum" : "sha256:a2b3a5ab9dff0b9fec6942f9a147abe9d7b2c31ffef5f513b02a33f90359d19b"
+  }, {
+    "seq" : 3,
+    "sql" : "select count(distinct \"the_year\") from \"time_by_day\"",
+    "rowCount" : 1,
+    "checksum" : "sha256:d95838638b57fb04835fc9103a8a6f4d724435aad81507e74d5cdb2ff57f7d77"
+  }, {
+    "seq" : 4,
+    "sql" : "select \"time_by_day\".\"the_year\" as \"c0\", \"product_class\".\"product_family\" as \"c1\", \"product_class\".\"product_department\" as \"c2\", sum(\"sales_fact_1997\".\"store_cost\") as \"m0\", sum(\"sales_fact_1997\".\"store_sales\") as \"m1\" from \"sales_fact_1997\" as \"sales_fact_1997\", \"time_by_day\" as \"time_by_day\", \"product\" as \"product\", \"product_class\" as \"product_class\" where \"time_by_day\".\"the_year\" = 1997 and \"sales_fact_1997\".\"time_id\" = \"time_by_day\".\"time_id\" and \"sales_fact_1997\".\"product_id\" = \"product\".\"product_id\" and \"product\".\"product_class_id\" = \"product_class\".\"product_class_id\" group by \"time_by_day\".\"the_year\", \"product_class\".\"product_family\", \"product_class\".\"product_department\"",
+    "rowCount" : 23,
+    "checksum" : "sha256:03ada2b708f0aed4eb179de2aca86a2ca22b09695872cb67b87f88e63f1b21ae"
+  } ]
+}

@@ -1,0 +1,45 @@
+{
+  "mdx" : "WITH MEMBER [Time].[Time].[1997 Q1 plus Q2] AS 'Aggregate({[Time].[1997].[Q1], [Time].[1997].[Q2]})', solve_order=1\nSELECT {[Measures].[Customer Count]} ON COLUMNS,\n  {[Time].[1997].[Q1], [Time].[1997].[Q2], [Time].[1997 Q1 plus Q2]} ON ROWS\nFROM Sales\nWHERE ([Store].[USA].[CA])",
+  "cellSet" : "Axis #0:\n{[Store].[Stores].[USA].[CA]}\nAxis #1:\n{[Measures].[Customer Count]}\nAxis #2:\n{[Time].[Time].[1997].[Q1]}\n{[Time].[Time].[1997].[Q2]}\n{[Time].[Time].[1997 Q1 plus Q2]}\nRow #0: 1,110\nRow #1: 1,173\nRow #2: 1,854\n",
+  "sqlExecutions" : [ {
+    "seq" : 0,
+    "sql" : "select \"time_by_day\".\"quarter\" as \"c0\", \"time_by_day\".\"the_year\" as \"c1\" from \"time_by_day\" as \"time_by_day\" where (\"time_by_day\".\"the_year\" = 1997) and UPPER(\"time_by_day\".\"quarter\") = UPPER('Q1') group by \"time_by_day\".\"quarter\", \"time_by_day\".\"the_year\" order by CASE WHEN \"time_by_day\".\"quarter\" IS NULL THEN 0 ELSE 1 END, \"time_by_day\".\"quarter\" ASC",
+    "rowCount" : 1,
+    "checksum" : "sha256:2f54178ce05621467ea96a2871014e9e642d9e108c5a609cb6f349b4549eecee"
+  }, {
+    "seq" : 1,
+    "sql" : "select \"time_by_day\".\"quarter\" as \"c0\", \"time_by_day\".\"the_year\" as \"c1\" from \"time_by_day\" as \"time_by_day\" where (\"time_by_day\".\"the_year\" = 1997) and UPPER(\"time_by_day\".\"quarter\") = UPPER('Q2') group by \"time_by_day\".\"quarter\", \"time_by_day\".\"the_year\" order by CASE WHEN \"time_by_day\".\"quarter\" IS NULL THEN 0 ELSE 1 END, \"time_by_day\".\"quarter\" ASC",
+    "rowCount" : 1,
+    "checksum" : "sha256:db891d7b7e706b1b4534a68875922580fb5b43eb541593c2bcb2b72bbd91e9f0"
+  }, {
+    "seq" : 2,
+    "sql" : "select \"time_by_day\".\"quarter\" as \"c0\", \"time_by_day\".\"the_year\" as \"c1\" from \"time_by_day\" as \"time_by_day\" where (\"time_by_day\".\"the_year\" = 1997) group by \"time_by_day\".\"quarter\", \"time_by_day\".\"the_year\" order by CASE WHEN \"time_by_day\".\"quarter\" IS NULL THEN 0 ELSE 1 END, \"time_by_day\".\"quarter\" ASC",
+    "rowCount" : 4,
+    "checksum" : "sha256:c57df97d6834402352beb838806fe80c575b7cf2311028b17ddaec5aacf2c1a3"
+  }, {
+    "seq" : 3,
+    "sql" : "select count(distinct \"store_state\") from \"store\"",
+    "rowCount" : 1,
+    "checksum" : "sha256:cffaa6cba69044d962d018316e1082c94bc303932e783129ce354d6ba58692fb"
+  }, {
+    "seq" : 4,
+    "sql" : "select count(distinct \"quarter\") from \"time_by_day\"",
+    "rowCount" : 1,
+    "checksum" : "sha256:527778acb6ad1ce1601b64ecacb5e9db68199ab9b6ed3e2b64b3747632d91c94"
+  }, {
+    "seq" : 5,
+    "sql" : "select count(distinct \"the_year\") from \"time_by_day\"",
+    "rowCount" : 1,
+    "checksum" : "sha256:d95838638b57fb04835fc9103a8a6f4d724435aad81507e74d5cdb2ff57f7d77"
+  }, {
+    "seq" : 6,
+    "sql" : "select \"store\".\"store_state\" as \"c0\", count(distinct \"sales_fact_1997\".\"customer_id\") as \"m0\" from \"sales_fact_1997\" as \"sales_fact_1997\", \"store\" as \"store\", \"time_by_day\" as \"time_by_day\" where \"store\".\"store_state\" = 'CA' and ((\"time_by_day\".\"the_year\" = 1997 and \"time_by_day\".\"quarter\" = 'Q1') or (\"time_by_day\".\"the_year\" = 1997 and \"time_by_day\".\"quarter\" = 'Q2')) and \"sales_fact_1997\".\"store_id\" = \"store\".\"store_id\" and \"sales_fact_1997\".\"time_id\" = \"time_by_day\".\"time_id\" group by \"store\".\"store_state\"",
+    "rowCount" : 1,
+    "checksum" : "sha256:2716e440c8108d60d0c97ec7a00beb99e8bf3549bf526d4caabb5154d914b878"
+  }, {
+    "seq" : 7,
+    "sql" : "select \"store\".\"store_state\" as \"c0\", \"time_by_day\".\"the_year\" as \"c1\", \"time_by_day\".\"quarter\" as \"c2\", count(distinct \"sales_fact_1997\".\"customer_id\") as \"m0\" from \"sales_fact_1997\" as \"sales_fact_1997\", \"store\" as \"store\", \"time_by_day\" as \"time_by_day\" where \"store\".\"store_state\" = 'CA' and \"time_by_day\".\"the_year\" = 1997 and \"time_by_day\".\"quarter\" in ('Q1', 'Q2') and \"sales_fact_1997\".\"store_id\" = \"store\".\"store_id\" and \"sales_fact_1997\".\"time_id\" = \"time_by_day\".\"time_id\" group by \"store\".\"store_state\", \"time_by_day\".\"the_year\", \"time_by_day\".\"quarter\"",
+    "rowCount" : 2,
+    "checksum" : "sha256:7efce2ad46d92ddbdeec64dac50039b20f5e73f6e3d1b1fb2199ec95b839a94f"
+  } ]
+}

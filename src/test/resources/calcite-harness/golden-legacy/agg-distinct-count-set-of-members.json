@@ -1,0 +1,25 @@
+{
+  "mdx" : "WITH MEMBER Gender.X AS 'Aggregate({[Gender].[Gender].Members})'\nSELECT Gender.X ON 0, [Measures].[Customer Count] ON 1 FROM Sales",
+  "cellSet" : "Axis #0:\n{}\nAxis #1:\n{[Customer].[Gender].[X]}\nAxis #2:\n{[Measures].[Customer Count]}\nRow #0: 5,581\n",
+  "sqlExecutions" : [ {
+    "seq" : 0,
+    "sql" : "select \"customer\".\"gender\" as \"c0\" from \"customer\" as \"customer\" group by \"customer\".\"gender\" order by CASE WHEN \"customer\".\"gender\" IS NULL THEN 1 ELSE 0 END, \"customer\".\"gender\" ASC",
+    "rowCount" : 2,
+    "checksum" : "sha256:ddf68cc9e7be4b444435990641e1bac551821a287d5cffcc9d30246818fa2d1c"
+  }, {
+    "seq" : 1,
+    "sql" : "select \"customer\".\"gender\" as \"c0\" from \"customer\" as \"customer\" group by \"customer\".\"gender\" order by CASE WHEN \"customer\".\"gender\" IS NULL THEN 0 ELSE 1 END, \"customer\".\"gender\" ASC",
+    "rowCount" : 2,
+    "checksum" : "sha256:ddf68cc9e7be4b444435990641e1bac551821a287d5cffcc9d30246818fa2d1c"
+  }, {
+    "seq" : 2,
+    "sql" : "select count(distinct \"the_year\") from \"time_by_day\"",
+    "rowCount" : 1,
+    "checksum" : "sha256:d95838638b57fb04835fc9103a8a6f4d724435aad81507e74d5cdb2ff57f7d77"
+  }, {
+    "seq" : 3,
+    "sql" : "select \"time_by_day\".\"the_year\" as \"c0\", count(distinct \"sales_fact_1997\".\"customer_id\") as \"m0\" from \"sales_fact_1997\" as \"sales_fact_1997\", \"time_by_day\" as \"time_by_day\" where \"time_by_day\".\"the_year\" = 1997 and \"sales_fact_1997\".\"time_id\" = \"time_by_day\".\"time_id\" group by \"time_by_day\".\"the_year\"",
+    "rowCount" : 1,
+    "checksum" : "sha256:da0290b645de771a98ff92defc6d8c72f948efa76d3eb481f7a74992fe89d703"
+  } ]
+}
