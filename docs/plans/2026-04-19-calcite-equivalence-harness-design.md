@@ -135,3 +135,14 @@ Each run writes `target/calcite-harness-report.html` — per-query pass/fail, ce
 - Promote Calcite from test-scope to compile-scope.
 - Expand harness to multi-backend matrix (DuckDB, Postgres via Testcontainers).
 - Run Sonatype audit on Calcite 1.41.0 before promoting scope.
+
+## Mutation test result (2026-04-19)
+
+Added `MutatingCalcitePassThrough` (rewrites `"the_year" = <literal>` to `"the_year" <> <literal>` via a scope-aware `SqlShuttle`) and `HarnessMutationTest` which runs it across the full smoke corpus. Observed **19 of 20** queries reported `CELL_SET_DRIFT` when the mutating interceptor was active; the remaining query (`ancestor`) has no `the_year` predicate and correctly stayed at `PASS`. Zero `BASELINE_DRIFT` — goldens remained untouched. Harness verified to have teeth.
+
+Shuttle scope was narrowed twice during implementation:
+1. First pass rewrote *all* `=` occurrences. This broke Mondrian's schema-loading member-lookup SQL (equality joins on key columns), causing cube construction to throw `Member '[Store].[Stores].[USA].[CA]' not found` before any user query could run.
+2. Narrowed to only `col = literal` pairs in WHERE/HAVING (not JOIN ON). Still broke schema load — member-level filter predicates (e.g. `store_country = 'USA'`) are also `col = literal` and are needed for the role/grant member resolution.
+3. Narrowed to only predicates whose column identifier's last segment is literally `the_year`. FoodMart's schema-loading lookups never filter on that column, so cube construction is untouched, but 19/20 data queries contain it and drift correctly.
+
+The `-Pcalcite-harness` run is green: `EquivalenceSmokeTest` 20/20 (identity round-trip via `CalcitePassThrough`) and `HarnessMutationTest` 1/1 (asserts drift under the mutating interceptor). No system-property leakage between tests.
