@@ -23,7 +23,7 @@ state** and the shopping list below is honest.
 | Run                                                                                 | Result            |
 |-------------------------------------------------------------------------------------|-------------------|
 | `mvn -Pcalcite-harness -Dmondrian.backend=legacy -Dtest='Equivalence*Test' test`    | **34/34 pass**    |
-| `mvn -Pcalcite-harness                        -Dtest='Equivalence*Test' test`      | **6/34 pass** (post-Task-E) |
+| `mvn -Pcalcite-harness                        -Dtest='Equivalence*Test' test`      | **11/34 pass** (post-Task-F) |
 | `mvn -Pcalcite-harness -Dtest='mondrian.calcite.**' test` (unit-level)              | 37/37 pass        |
 | `mvn -Pcalcite-harness -Dtest='mondrian.test.calcite.BasicSelectEndToEndTest' test` | 1/1 pass (cell-set parity vs. legacy golden) |
 
@@ -164,6 +164,59 @@ consult `mondrian.spi.impl.*Dialect`.
 | `src/test/java/mondrian/test/calcite/BasicSelectEndToEndTest.java` | inverted to `expected=UnsupportedTranslation` contract |
 | `docs/plans/2026-04-19-calcite-backend-foundations-checkpoint4.md` | added `§ Policy change: no fallback` |
 | `docs/plans/2026-04-19-calcite-backend-foundations-checkpoint4b.md` | new (this file) |
+
+### Task F update — segment-load predicate coverage
+
+`CalcitePlannerAdapters.fromSegmentLoad` now handles the three predicate
+buckets that dominated the post-Task-E shopping list:
+
+- **`LiteralColumnPredicate`** — TRUE contributes no filter; FALSE flips
+  a new `PlannerRequest.universalFalse` flag that the renderer honours
+  by emitting a `b.filter(b.literal(false))` as the sole filter.
+- **`ListColumnPredicate` with N ≥ 2 values** — translates to an IN-style
+  `PlannerRequest.Filter` (carrying `Operator.IN` + N-ary literal list),
+  which `CalciteSqlPlanner` renders as an OR-chain of equalities (more
+  dialect-portable than Calcite's default `SEARCH`/`SARG` unparse).
+  Single-value lists collapse to `Operator.EQ` as before; empty lists
+  signal universalFalse.
+- **`AndPredicate` across columns** — recurses on each child, concatenating
+  the translated per-leaf filters (conjunction is implicit in successive
+  `b.filter(...)` calls).
+- **Single-column `OrPredicate`** — accepted and collapsed to IN.
+- **Cross-column `OrPredicate`** — throws `UnsupportedTranslation`
+  (would require a different filter shape on `PlannerRequest`).
+- **`MinusStarPredicate`** — throws `UnsupportedTranslation` (not in
+  the current corpus).
+
+`PlannerRequest.Filter` gained an `Operator` enum (`EQ`, `IN`) and an
+N-ary `literals` list; the single-literal constructor is preserved as a
+back-compat shortcut. `PlannerRequest` gained a `universalFalse` flag.
+
+The harness moved **6/34 → 11/34** passing. New pass wins (all on
+`EquivalenceSmokeTest`): `time-fn`, `aggregate-measure`,
+`hierarchy-children`, `hierarchy-parent`, `ancestor`, `ytd`,
+`parallelperiod`. `EquivalenceAggregateTest` remains 0/11 — every
+aggregate query is now blocked on the *next* shape (primarily
+distinct-count and snowflake), not predicate translation.
+
+## Post-Task-F first-throw bucket distribution
+
+| Count | First `UnsupportedTranslation` |
+|-------|--------------------------------|
+| 6     | `fromSegmentLoad: unsupported aggregator distinct-count` |
+| 3     | `fromTupleRead: non-default TupleConstraint … RolapNativeTopCount$TopCountConstraint` |
+| 3     | `fromTupleRead: composite-key level not yet supported (keyList.size=2)` |
+| 3     | `fromSegmentLoad: only single-hop dimension joins supported; path length=3` (snowflake) |
+| 2     | `fromTupleRead: non-default TupleConstraint … RolapNativeFilter$FilterConstraint` |
+| 1     | `fromTupleRead: non-default TupleConstraint … RolapNativeCrossJoin$NonEmptyCrossJoinConstraint` |
+| 1     | `fromTupleRead: non-default TupleConstraint … DescendantsConstraint` |
+| 1     | `fromTupleRead: multi-target crossjoin not yet supported (levels.size=2)` |
+| 1     | `fromSegmentLoad: OrPredicate across columns not yet supported (cols=2)` |
+| 1     | `fromSegmentLoad: OrPredicate across columns not yet supported (cols=1)` |
+
+The two Literal/List/compound buckets that owned 24 first-throws under
+Task-E are gone from this table. The new dominant bucket is
+distinct-count aggregator (6) — the obvious next unlock.
 
 ## Conclusion
 

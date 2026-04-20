@@ -17,9 +17,14 @@ import mondrian.rolap.RolapSchema;
 import mondrian.rolap.RolapStar;
 import mondrian.rolap.StarColumnPredicate;
 import mondrian.rolap.StarPredicate;
+import mondrian.rolap.agg.AndPredicate;
 import mondrian.rolap.agg.GroupingSet;
 import mondrian.rolap.agg.GroupingSetsList;
 import mondrian.rolap.agg.ListColumnPredicate;
+import mondrian.rolap.agg.LiteralColumnPredicate;
+import mondrian.rolap.agg.MinusStarPredicate;
+import mondrian.rolap.agg.OrPredicate;
+import mondrian.rolap.agg.PredicateColumn;
 import mondrian.rolap.agg.Segment;
 import mondrian.rolap.agg.ValueColumnPredicate;
 import mondrian.rolap.sql.TupleConstraint;
@@ -339,12 +344,6 @@ public final class CalcitePlannerAdapters {
             throw new UnsupportedTranslation(
                 "fromSegmentLoad: null GroupingSetsList");
         }
-        if (compoundPredicateList != null
-            && !compoundPredicateList.isEmpty())
-        {
-            throw new UnsupportedTranslation(
-                "fromSegmentLoad: compound predicates not yet supported");
-        }
         if (groupingSetsList.useGroupingSets()) {
             throw new UnsupportedTranslation(
                 "fromSegmentLoad: GROUPING SETS rollup not yet supported");
@@ -402,21 +401,39 @@ public final class CalcitePlannerAdapters {
             b.addGroupBy(
                 new PlannerRequest.Column(colTableAlias, colName));
 
-            // Per-column predicate → equality filter.
+            // Per-column predicate → filter(s).
             StarColumnPredicate p = predicates[i];
             if (p == null) {
                 continue;
             }
-            ValueColumnPredicate eq = asSingleValuePredicate(p);
-            if (eq == null) {
-                throw new UnsupportedTranslation(
-                    "fromSegmentLoad: unsupported column predicate "
-                    + p.getClass().getName());
+            PlannerRequest.Column filterCol =
+                new PlannerRequest.Column(colTableAlias, colName);
+            if (addColumnPredicateFilters(b, filterCol, p)) {
+                // universalFalse wins; short-circuit all remaining work.
+                b.universalFalse(true);
             }
-            b.addFilter(
-                new PlannerRequest.Filter(
-                    new PlannerRequest.Column(colTableAlias, colName),
-                    eq.getValue()));
+        }
+
+        // 1b) Compound predicates (AND/OR across columns). Translated as
+        //    per-child filters appended to the request. We route each leaf
+        //    predicate's column back to its table alias via the RolapStar.
+        if (compoundPredicateList != null
+            && !compoundPredicateList.isEmpty())
+        {
+            // Ensure joins are added for any dim table referenced by a
+            // compound predicate before filters are emitted against it.
+            java.util.Set<RolapStar.Table> compoundTables =
+                collectCompoundTables(compoundPredicateList, star);
+            for (RolapStar.Table t : compoundTables) {
+                if (t != factTable && joinedAliases.add(t.getAlias())) {
+                    addSingleHopJoin(b, factTable, t);
+                }
+            }
+            for (StarPredicate sp : compoundPredicateList) {
+                if (addCompoundFilters(b, sp)) {
+                    b.universalFalse(true);
+                }
+            }
         }
 
         // 2) Measures.
@@ -505,24 +522,205 @@ public final class CalcitePlannerAdapters {
     }
 
     /**
-     * Unwraps a predicate to a single {@link ValueColumnPredicate} when it
-     * represents an equality constraint against one value, or null
-     * otherwise. Handles the common case of a
-     * {@link ListColumnPredicate} wrapping a single value (legacy emits
-     * "x = v" for that, not "x in (v)").
+     * Translates a per-grouping-column {@link StarColumnPredicate} into one
+     * or more filters on the given column and appends them to the builder.
+     *
+     * <p>Returns {@code true} when the predicate reduces to FALSE (no rows
+     * can match) — the caller should flip {@code universalFalse}.
+     *
+     * <p>Supported shapes:
+     * <ul>
+     *   <li>{@link ValueColumnPredicate} → single EQ filter.</li>
+     *   <li>{@link LiteralColumnPredicate} TRUE → no filter contribution.
+     *       FALSE → universalFalse.</li>
+     *   <li>{@link ListColumnPredicate} with N value children → IN-style
+     *       filter (OR-of-equalities at render time). Single-value list
+     *       collapses to EQ. Empty list → universalFalse.</li>
+     * </ul>
      */
-    private static ValueColumnPredicate asSingleValuePredicate(
+    static boolean addColumnPredicateFilters(
+        PlannerRequest.Builder b,
+        PlannerRequest.Column col,
         StarColumnPredicate p)
     {
         if (p instanceof ValueColumnPredicate) {
-            return (ValueColumnPredicate) p;
+            b.addFilter(
+                new PlannerRequest.Filter(
+                    col, ((ValueColumnPredicate) p).getValue()));
+            return false;
+        }
+        if (p instanceof LiteralColumnPredicate) {
+            boolean v = ((LiteralColumnPredicate) p).getValue();
+            return !v; // TRUE → no filter; FALSE → universalFalse
         }
         if (p instanceof ListColumnPredicate) {
             ListColumnPredicate lp = (ListColumnPredicate) p;
-            if (lp.getPredicates().size() == 1
-                && lp.getPredicates().get(0) instanceof ValueColumnPredicate)
+            List<StarColumnPredicate> kids = lp.getPredicates();
+            if (kids.isEmpty()) {
+                return true; // empty OR = never matches
+            }
+            List<Object> literals = new java.util.ArrayList<>(kids.size());
+            for (StarColumnPredicate kid : kids) {
+                if (!(kid instanceof ValueColumnPredicate)) {
+                    throw new UnsupportedTranslation(
+                        "fromSegmentLoad: ListColumnPredicate child is not "
+                        + "a ValueColumnPredicate: "
+                        + kid.getClass().getName());
+                }
+                literals.add(((ValueColumnPredicate) kid).getValue());
+            }
+            if (literals.size() == 1) {
+                b.addFilter(new PlannerRequest.Filter(col, literals.get(0)));
+            } else {
+                b.addFilter(
+                    new PlannerRequest.Filter(
+                        col, PlannerRequest.Operator.IN, literals));
+            }
+            return false;
+        }
+        if (p instanceof MinusStarPredicate) {
+            throw new UnsupportedTranslation(
+                "fromSegmentLoad: MinusStarPredicate not yet supported");
+        }
+        throw new UnsupportedTranslation(
+            "fromSegmentLoad: unsupported column predicate "
+            + p.getClass().getName());
+    }
+
+    /**
+     * Translates a compound {@link StarPredicate} (AndPredicate /
+     * OrPredicate / bare column predicate) and appends filter
+     * contributions to the builder. Returns {@code true} when the
+     * predicate reduces to FALSE.
+     *
+     * <p>An {@link AndPredicate} with N children contributes a conjunction:
+     * each child is translated independently and the resulting filters are
+     * AND-ed together (which is what successive {@code b.filter(...)} calls
+     * already do on the Calcite side).
+     *
+     * <p>{@link OrPredicate} across columns is rejected — single-column OR
+     * is already modelled by {@link ListColumnPredicate}, and true
+     * cross-column disjunction would require a different filter shape on
+     * {@link PlannerRequest}.
+     */
+    static boolean addCompoundFilters(
+        PlannerRequest.Builder b, StarPredicate sp)
+    {
+        if (sp instanceof StarColumnPredicate) {
+            StarColumnPredicate cp = (StarColumnPredicate) sp;
+            PredicateColumn pc = cp.getColumn();
+            PlannerRequest.Column col = columnForPredicate(pc);
+            return addColumnPredicateFilters(b, col, cp);
+        }
+        if (sp instanceof AndPredicate) {
+            boolean anyFalse = false;
+            for (StarPredicate child : ((AndPredicate) sp).getChildren()) {
+                anyFalse |= addCompoundFilters(b, child);
+            }
+            return anyFalse;
+        }
+        if (sp instanceof OrPredicate) {
+            OrPredicate or = (OrPredicate) sp;
+            // Single-column OR is semantically equivalent to a
+            // ListColumnPredicate; detect via the column bit-key.
+            List<PredicateColumn> cols = or.getColumnList();
+            if (cols.size() == 1
+                && allChildrenAreValueOnSameColumn(or, cols.get(0)))
             {
-                return (ValueColumnPredicate) lp.getPredicates().get(0);
+                PlannerRequest.Column col = columnForPredicate(cols.get(0));
+                List<Object> literals = new java.util.ArrayList<>();
+                for (StarPredicate child : or.getChildren()) {
+                    literals.add(
+                        ((ValueColumnPredicate) child).getValue());
+                }
+                if (literals.isEmpty()) {
+                    return true;
+                }
+                if (literals.size() == 1) {
+                    b.addFilter(
+                        new PlannerRequest.Filter(col, literals.get(0)));
+                } else {
+                    b.addFilter(
+                        new PlannerRequest.Filter(
+                            col, PlannerRequest.Operator.IN, literals));
+                }
+                return false;
+            }
+            throw new UnsupportedTranslation(
+                "fromSegmentLoad: OrPredicate across columns not yet "
+                + "supported (cols=" + cols.size() + ")");
+        }
+        if (sp instanceof MinusStarPredicate) {
+            throw new UnsupportedTranslation(
+                "fromSegmentLoad: MinusStarPredicate not yet supported");
+        }
+        throw new UnsupportedTranslation(
+            "fromSegmentLoad: unsupported compound predicate "
+            + sp.getClass().getName());
+    }
+
+    private static boolean allChildrenAreValueOnSameColumn(
+        OrPredicate or, PredicateColumn pc)
+    {
+        for (StarPredicate child : or.getChildren()) {
+            if (!(child instanceof ValueColumnPredicate)) {
+                return false;
+            }
+            if (((ValueColumnPredicate) child).getColumn() != pc) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static PlannerRequest.Column columnForPredicate(PredicateColumn pc)
+    {
+        RolapSchema.PhysColumn phys = pc.physColumn;
+        if (!(phys instanceof RolapSchema.PhysRealColumn)) {
+            throw new UnsupportedTranslation(
+                "fromSegmentLoad: compound predicate on non-real column "
+                + phys);
+        }
+        String alias = phys.relation == null ? null : phys.relation.getAlias();
+        return new PlannerRequest.Column(
+            alias, ((RolapSchema.PhysRealColumn) phys).name);
+    }
+
+    /**
+     * Collects the set of {@link RolapStar.Table} instances referenced by
+     * the columns in a compound-predicate list. Used to ensure joins are
+     * added for any dim table the compound predicates filter on.
+     */
+    private static java.util.Set<RolapStar.Table> collectCompoundTables(
+        List<StarPredicate> predicates, RolapStar star)
+    {
+        java.util.Set<RolapStar.Table> out = new java.util.LinkedHashSet<>();
+        for (StarPredicate sp : predicates) {
+            for (PredicateColumn pc : sp.getColumnList()) {
+                RolapStar.Table t = findStarTable(
+                    star.getFactTable(), pc.physColumn.relation);
+                if (t == null) {
+                    throw new UnsupportedTranslation(
+                        "fromSegmentLoad: compound predicate references "
+                        + "column on unknown relation "
+                        + pc.physColumn.relation);
+                }
+                out.add(t);
+            }
+        }
+        return out;
+    }
+
+    private static RolapStar.Table findStarTable(
+        RolapStar.Table root, RolapSchema.PhysRelation rel)
+    {
+        if (root.getRelation() == rel) {
+            return root;
+        }
+        for (RolapStar.Table child : root.getChildren()) {
+            RolapStar.Table hit = findStarTable(child, rel);
+            if (hit != null) {
+                return hit;
             }
         }
         return null;

@@ -81,8 +81,12 @@ public final class CalciteSqlPlanner {
                     b.field(2, 1, j.dimKey)));
         }
 
-        for (PlannerRequest.Filter f : req.filters) {
-            b.filter(b.equals(b.field(f.column.name), b.literal(f.literal)));
+        if (req.universalFalse) {
+            b.filter(b.literal(false));
+        } else {
+            for (PlannerRequest.Filter f : req.filters) {
+                b.filter(filterRex(b, f));
+            }
         }
 
         if (req.isAggregation()) {
@@ -119,6 +123,22 @@ public final class CalciteSqlPlanner {
         }
 
         return b.build();
+    }
+
+    private static RexNode filterRex(
+        RelBuilder b, PlannerRequest.Filter f)
+    {
+        RexNode col = b.field(f.column.name);
+        if (f.literals.size() == 1) {
+            return b.equals(col, b.literal(f.literals.get(0)));
+        }
+        // Multi-literal → OR-chain of equalities (friendlier to dialects
+        // than IN; avoids Calcite's SEARCH/SARG unparse surprises).
+        List<RexNode> ors = new ArrayList<>(f.literals.size());
+        for (Object lit : f.literals) {
+            ors.add(b.equals(col, b.literal(lit)));
+        }
+        return b.or(ors);
     }
 
     private static RelBuilder.AggCall aggCall(

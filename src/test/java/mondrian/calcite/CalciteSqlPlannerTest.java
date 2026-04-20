@@ -120,6 +120,49 @@ public class CalciteSqlPlannerTest {
     }
 
     @Test
+    public void inListEmitsOrChain() {
+        CalciteSqlPlanner planner = plannerFor(HsqldbSqlDialect.DEFAULT);
+        PlannerRequest req = PlannerRequest.builder("sales_fact_1997")
+            .addJoin(new PlannerRequest.Join(
+                "time_by_day", "time_id", "time_id"))
+            .addFilter(new PlannerRequest.Filter(
+                new PlannerRequest.Column("time_by_day", "the_year"),
+                PlannerRequest.Operator.IN,
+                java.util.Arrays.<Object>asList(1997, 1998, 1999)))
+            .addGroupBy(new PlannerRequest.Column("time_by_day", "the_year"))
+            .addMeasure(new PlannerRequest.Measure(
+                PlannerRequest.AggFn.SUM,
+                new PlannerRequest.Column("sales_fact_1997", "unit_sales"),
+                "m"))
+            .build();
+        String sql = planner.plan(req);
+        assertNotNull(sql);
+        assertTrue("expected 1997 in: " + sql, sql.contains("1997"));
+        assertTrue("expected 1998 in: " + sql, sql.contains("1998"));
+        assertTrue("expected 1999 in: " + sql, sql.contains("1999"));
+        String lower = sql.toLowerCase();
+        assertTrue(
+            "expected OR (or IN) chain in: " + sql,
+            lower.contains(" or ") || lower.contains(" in "));
+    }
+
+    @Test
+    public void falseFilterEmitsFalseLiteral() {
+        CalciteSqlPlanner planner = plannerFor(HsqldbSqlDialect.DEFAULT);
+        PlannerRequest req = PlannerRequest.builder("sales_fact_1997")
+            .addProjection(new PlannerRequest.Column(null, "unit_sales"))
+            .universalFalse(true)
+            .build();
+        String sql = planner.plan(req);
+        assertNotNull(sql);
+        String lower = sql.toLowerCase();
+        assertTrue(
+            "expected FALSE literal in WHERE: " + sql,
+            lower.contains("false") || lower.contains("1 = 0")
+                || lower.contains("1=0"));
+    }
+
+    @Test
     public void dialectAwareness() {
         // Baseline HSQLDB dialect uses double-quoted identifiers; build a
         // custom-context variant using backtick identifier quoting so the

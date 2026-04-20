@@ -58,12 +58,38 @@ public final class PlannerRequest {
         }
     }
 
+    public enum Operator { EQ, IN }
+
     public static final class Filter {
         public final Column column;
-        public final Object literal;
+        public final Operator op;
+        public final List<Object> literals;
+        /** Back-compat shortcut: single-literal EQ filter. */
         public Filter(Column column, Object literal) {
+            this(column, Operator.EQ,
+                java.util.Collections.singletonList(literal));
+        }
+        public Filter(Column column, Operator op, List<Object> literals) {
             this.column = column;
-            this.literal = literal;
+            this.op = op;
+            this.literals = List.copyOf(literals);
+            if (op == Operator.EQ && this.literals.size() != 1) {
+                throw new IllegalArgumentException(
+                    "EQ filter requires exactly one literal; got "
+                    + this.literals.size());
+            }
+            if (op == Operator.IN && this.literals.isEmpty()) {
+                throw new IllegalArgumentException(
+                    "IN filter requires at least one literal");
+            }
+        }
+        /** Back-compat accessor: EQ filter's single literal. */
+        public Object literal() {
+            if (op != Operator.EQ) {
+                throw new IllegalStateException(
+                    "literal() only valid on EQ filters; this is " + op);
+            }
+            return literals.get(0);
         }
     }
 
@@ -97,6 +123,10 @@ public final class PlannerRequest {
     /** Row-level DISTINCT on projections. Only valid when not aggregating.
      *  Added for tuple-read / level-member dispatch (Task E). */
     public final boolean distinct;
+    /** When true, the request has a universal FALSE filter (zero rows).
+     *  Other {@link #filters} are ignored by the renderer.
+     *  Added for segment-load predicate translation (Task F). */
+    public final boolean universalFalse;
 
     private PlannerRequest(Builder b) {
         this.factTable = b.factTable;
@@ -107,6 +137,7 @@ public final class PlannerRequest {
         this.filters = List.copyOf(b.filters);
         this.orderBy = List.copyOf(b.orderBy);
         this.distinct = b.distinct;
+        this.universalFalse = b.universalFalse;
         if (this.distinct
             && (!this.measures.isEmpty() || !this.groupBy.isEmpty()))
         {
@@ -133,6 +164,7 @@ public final class PlannerRequest {
         private final List<Filter> filters = new ArrayList<>();
         private final List<OrderBy> orderBy = new ArrayList<>();
         private boolean distinct;
+        private boolean universalFalse;
 
         private Builder(String factTable) {
             if (factTable == null || factTable.isEmpty()) {
@@ -151,6 +183,10 @@ public final class PlannerRequest {
         public Builder addFilter(Filter f) { filters.add(f); return this; }
         public Builder addOrderBy(OrderBy o) { orderBy.add(o); return this; }
         public Builder distinct(boolean d) { this.distinct = d; return this; }
+        public Builder universalFalse(boolean f) {
+            this.universalFalse = f;
+            return this;
+        }
 
         public PlannerRequest build() {
             if (projections.isEmpty()
