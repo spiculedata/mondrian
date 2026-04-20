@@ -163,6 +163,28 @@ public class CalciteSqlPlannerTest {
     }
 
     @Test
+    public void distinctCountMeasureEmitsCountDistinct() {
+        CalciteSqlPlanner planner = plannerFor(HsqldbSqlDialect.DEFAULT);
+        PlannerRequest req = PlannerRequest.builder("sales_fact_1997")
+            .addGroupBy(
+                new PlannerRequest.Column("sales_fact_1997", "time_id"))
+            .addMeasure(new PlannerRequest.Measure(
+                PlannerRequest.AggFn.COUNT,
+                new PlannerRequest.Column("sales_fact_1997", "customer_id"),
+                "dc",
+                true))
+            .build();
+        String sql = planner.plan(req);
+        assertNotNull(sql);
+        String lower = sql.toLowerCase().replaceAll("\\s+", " ");
+        assertTrue(
+            "expected COUNT(DISTINCT ...) in: " + sql,
+            lower.contains("count(distinct"));
+        assertTrue("expected customer_id in: " + sql,
+            lower.contains("customer_id"));
+    }
+
+    @Test
     public void dialectAwareness() {
         // Baseline HSQLDB dialect uses double-quoted identifiers; build a
         // custom-context variant using backtick identifier quoting so the

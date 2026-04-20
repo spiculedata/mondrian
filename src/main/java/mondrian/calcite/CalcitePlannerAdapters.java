@@ -455,13 +455,14 @@ public final class CalcitePlannerAdapters {
                     "fromSegmentLoad: non-real measure expression "
                     + mexpr);
             }
-            PlannerRequest.AggFn fn = mapAggregator(m.getAggregator());
+            AggOp op = mapAggregator(m.getAggregator());
             String mcol = ((RolapSchema.PhysRealColumn) mexpr).name;
             b.addMeasure(
                 new PlannerRequest.Measure(
-                    fn,
+                    op.fn,
                     new PlannerRequest.Column(factTable.getAlias(), mcol),
-                    "m" + i));
+                    "m" + i,
+                    op.distinct));
         }
 
         return b.build();
@@ -734,24 +735,38 @@ public final class CalcitePlannerAdapters {
         return null;
     }
 
-    private static PlannerRequest.AggFn mapAggregator(RolapAggregator agg) {
+    /** Pair: translated {@link PlannerRequest.AggFn} + DISTINCT flag. */
+    static final class AggOp {
+        final PlannerRequest.AggFn fn;
+        final boolean distinct;
+        AggOp(PlannerRequest.AggFn fn, boolean distinct) {
+            this.fn = fn;
+            this.distinct = distinct;
+        }
+    }
+
+    static AggOp mapAggregator(RolapAggregator agg) {
         if (agg == RolapAggregator.Sum) {
-            return PlannerRequest.AggFn.SUM;
+            return new AggOp(PlannerRequest.AggFn.SUM, false);
         }
         if (agg == RolapAggregator.Count) {
-            return PlannerRequest.AggFn.COUNT;
+            return new AggOp(PlannerRequest.AggFn.COUNT, false);
         }
         if (agg == RolapAggregator.Min) {
-            return PlannerRequest.AggFn.MIN;
+            return new AggOp(PlannerRequest.AggFn.MIN, false);
         }
         if (agg == RolapAggregator.Max) {
-            return PlannerRequest.AggFn.MAX;
+            return new AggOp(PlannerRequest.AggFn.MAX, false);
         }
         if (agg == RolapAggregator.Avg) {
-            return PlannerRequest.AggFn.AVG;
+            return new AggOp(PlannerRequest.AggFn.AVG, false);
+        }
+        if (agg == RolapAggregator.DistinctCount) {
+            return new AggOp(PlannerRequest.AggFn.COUNT, true);
         }
         throw new UnsupportedTranslation(
-            "fromSegmentLoad: unsupported aggregator " + agg.getName());
+            "fromSegmentLoad: unsupported aggregator "
+            + (agg == null ? "null" : agg.getName()));
     }
 
     /**

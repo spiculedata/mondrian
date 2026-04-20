@@ -218,6 +218,59 @@ The two Literal/List/compound buckets that owned 24 first-throws under
 Task-E are gone from this table. The new dominant bucket is
 distinct-count aggregator (6) — the obvious next unlock.
 
+### Task G update — distinct-count aggregator in `fromSegmentLoad`
+
+`CalcitePlannerAdapters.mapAggregator` now recognises
+`RolapAggregator.DistinctCount` (alongside the explicitly enumerated
+`Sum`/`Count`/`Min`/`Max`/`Avg` singletons) and maps it to
+`Measure(COUNT, col, alias, distinct=true)`. `CalciteSqlPlanner.aggCall`
+already emitted `COUNT(DISTINCT ...)` from that flag (carried over from
+the Task-C cardinality probe), so no renderer work was needed. Unknown
+aggregators keep throwing `UnsupportedTranslation` but now carry the
+aggregator's *name* in the message so the shopping list is grep-able.
+
+The harness moved **11/34 → 16/34** passing:
+
+- `EquivalenceAggregateTest`: 0/11 → **4/11** (`agg-distinct-count-usa`,
+  `agg-distinct-count-california-vs-oregon`,
+  `agg-distinct-count-per-quarter`, `agg-distinct-count-per-family`
+  — the four distinct-count queries whose shape is a single grouping set
+  with only EQ/IN filters and single-hop joins).
+- `EquivalenceSmokeTest`: 8/20 → **9/20** (one additional smoke query
+  was gated on the aggregator check behind a cache miss).
+- `EquivalenceHarnessTest`: 3/3 unit tests still green.
+
+The remaining two distinct-count queries
+(`agg-distinct-count-two-states`, `agg-distinct-count-quarters`) now
+fail on **`OrPredicate across columns`** rather than the aggregator.
+The third (`agg-distinct-count-product-family-weekly`) hits the
+**path length=3 snowflake** gate. The fourth
+(`agg-distinct-count-customers-levels`) is a `LEGACY_DRIFT` — unrelated
+to translation, pre-existing.
+
+Legacy harness: 34/34 (translator-only change; legacy path
+unaffected).
+
+### Post-Task-G first-throw bucket distribution
+
+| Count | First `UnsupportedTranslation` |
+|-------|--------------------------------|
+| 3     | `fromTupleRead: non-default TupleConstraint … RolapNativeTopCount$TopCountConstraint` |
+| 3     | `fromTupleRead: composite-key level not yet supported (keyList.size=2)` |
+| 3     | `fromSegmentLoad: only single-hop dimension joins supported; path length=3` (snowflake) |
+| 2     | `fromTupleRead: non-default TupleConstraint … RolapNativeFilter$FilterConstraint` |
+| 1     | `fromTupleRead: non-default TupleConstraint … RolapNativeCrossJoin$NonEmptyCrossJoinConstraint` |
+| 1     | `fromTupleRead: non-default TupleConstraint … DescendantsConstraint` |
+| 1     | `fromTupleRead: multi-target crossjoin not yet supported (levels.size=2)` |
+| 1     | `fromSegmentLoad: OrPredicate across columns not yet supported (cols=2)` |
+| 1     | `fromSegmentLoad: OrPredicate across columns not yet supported (cols=1)` |
+
+The distinct-count row has dropped off the table entirely. The three
+dominant buckets each own three queries apiece: native-constraint tuple
+reads (TopCount, composite keys) and snowflake joins. No aggregators
+other than `Sum`/`Count`/`Min`/`Max`/`Avg`/`DistinctCount` appear in the
+corpus — no new "unknown aggregator" throws surfaced.
+
 ## Conclusion
 
 The dispatch seams are closed. Every SQL string the Calcite path produces
