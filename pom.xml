@@ -85,21 +85,20 @@
       <version>1.8.0.10</version>
       <scope>test</scope>
     </dependency>
-    <!-- Apache Calcite 1.41.0: test-scope only. Used by the calcite-equivalence-harness
-         (see docs/plans/2026-04-19-calcite-equivalence-harness.md) to parse and
-         re-emit SQL emitted by Mondrian for drift detection. Do NOT promote to
-         compile scope — Calcite must never appear on Mondrian's runtime classpath. -->
+    <!-- Apache Calcite 1.41.0: compile scope. Originally added at test scope
+         for the calcite-equivalence-harness, promoted to compile scope as the
+         foundation of the new mondrian/calcite/ backend (see
+         docs/plans/2026-04-19-calcite-backend-rewrite-design.md and
+         docs/plans/2026-04-19-calcite-backend-foundations.md, Task 1). -->
     <dependency>
       <groupId>org.apache.calcite</groupId>
       <artifactId>calcite-core</artifactId>
       <version>1.41.0</version>
-      <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.apache.calcite</groupId>
       <artifactId>calcite-linq4j</artifactId>
       <version>1.41.0</version>
-      <scope>test</scope>
     </dependency>
   </dependencies>
 
