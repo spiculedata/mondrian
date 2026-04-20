@@ -1,0 +1,25 @@
+{
+  "mdx" : "with member [Measures].[Unit Sales 10pct] as '[Measures].[Unit Sales] * 1.1'\nselect {[Measures].[Unit Sales 10pct]} on columns,\n  {[Product].[Product Family].members} on rows\nfrom Sales\nwhere ([Time].[1997])",
+  "cellSet" : "Axis #0:\n{[Time].[Time].[1997]}\nAxis #1:\n{[Measures].[Unit Sales 10pct]}\nAxis #2:\n{[Product].[Products].[Drink]}\n{[Product].[Products].[Food]}\n{[Product].[Products].[Non-Consumable]}\nRow #0: 27,057\nRow #1: 211,134\nRow #2: 55,260\n",
+  "sqlExecutions" : [ {
+    "seq" : 0,
+    "sql" : "SELECT \"product_class\".\"product_family\"\nFROM \"product_class\"\nINNER JOIN \"product\" ON \"product_class\".\"product_class_id\" = \"product\".\"product_class_id\"\nGROUP BY \"product_class\".\"product_family\"\nORDER BY \"product_class\".\"product_family\"",
+    "rowCount" : 3,
+    "checksum" : "sha256:e3614f4f86801462eb83492a965f84de8ab6ef92f984c31756da41e8d0eba94f"
+  }, {
+    "seq" : 1,
+    "sql" : "SELECT COUNT(DISTINCT \"product_family\") AS \"c\"\nFROM \"product_class\"",
+    "rowCount" : 1,
+    "checksum" : "sha256:8ddce159f92f86d0d74b632d2394cb611ec46e296a7bbeef160140253ff2d286"
+  }, {
+    "seq" : 2,
+    "sql" : "SELECT COUNT(DISTINCT \"the_year\") AS \"c\"\nFROM \"time_by_day\"",
+    "rowCount" : 1,
+    "checksum" : "sha256:d95838638b57fb04835fc9103a8a6f4d724435aad81507e74d5cdb2ff57f7d77"
+  }, {
+    "seq" : 3,
+    "sql" : "SELECT \"time_by_day\".\"the_year\", \"product_class\".\"product_family\", SUM(\"sales_fact_1997\".\"unit_sales\") AS \"m0\"\nFROM \"sales_fact_1997\"\nINNER JOIN \"time_by_day\" ON \"sales_fact_1997\".\"time_id\" = \"time_by_day\".\"time_id\"\nINNER JOIN \"product\" ON \"sales_fact_1997\".\"product_id\" = \"product\".\"product_id\"\nINNER JOIN \"product_class\" ON \"product\".\"product_class_id\" = \"product_class\".\"product_class_id\"\nWHERE \"time_by_day\".\"the_year\" = 1997\nGROUP BY \"time_by_day\".\"the_year\", \"product_class\".\"product_family\"",
+    "rowCount" : 3,
+    "checksum" : "sha256:430fb0e846cf9505e53f80fd86de7de3ff18ea86af13e0ca57d76d840616027b"
+  } ]
+}

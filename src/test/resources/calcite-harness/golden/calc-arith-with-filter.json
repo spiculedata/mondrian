@@ -1,0 +1,35 @@
+{
+  "mdx" : "with member [Measures].[Profit] as '[Measures].[Store Sales] - [Measures].[Store Cost]'\nselect {[Measures].[Profit]} on columns,\n  {[Product].[Product Family].members} on rows\nfrom Sales\nwhere ([Time].[1997].[Q1])",
+  "cellSet" : "Axis #0:\n{[Time].[Time].[1997].[Q1]}\nAxis #1:\n{[Measures].[Profit]}\nAxis #2:\n{[Product].[Products].[Drink]}\n{[Product].[Products].[Food]}\n{[Product].[Products].[Non-Consumable]}\nRow #0: 6,964.30\nRow #1: 60,814.47\nRow #2: 16,097.34\n",
+  "sqlExecutions" : [ {
+    "seq" : 0,
+    "sql" : "select \"time_by_day\".\"quarter\" as \"c0\", \"time_by_day\".\"the_year\" as \"c1\" from \"time_by_day\" as \"time_by_day\" where (\"time_by_day\".\"the_year\" = 1997) and UPPER(\"time_by_day\".\"quarter\") = UPPER('Q1') group by \"time_by_day\".\"quarter\", \"time_by_day\".\"the_year\" order by CASE WHEN \"time_by_day\".\"quarter\" IS NULL THEN 0 ELSE 1 END, \"time_by_day\".\"quarter\" ASC",
+    "rowCount" : 1,
+    "checksum" : "sha256:2f54178ce05621467ea96a2871014e9e642d9e108c5a609cb6f349b4549eecee"
+  }, {
+    "seq" : 1,
+    "sql" : "SELECT \"product_class\".\"product_family\"\nFROM \"product_class\"\nINNER JOIN \"product\" ON \"product_class\".\"product_class_id\" = \"product\".\"product_class_id\"\nGROUP BY \"product_class\".\"product_family\"\nORDER BY \"product_class\".\"product_family\"",
+    "rowCount" : 3,
+    "checksum" : "sha256:e3614f4f86801462eb83492a965f84de8ab6ef92f984c31756da41e8d0eba94f"
+  }, {
+    "seq" : 2,
+    "sql" : "SELECT COUNT(DISTINCT \"product_family\") AS \"c\"\nFROM \"product_class\"",
+    "rowCount" : 1,
+    "checksum" : "sha256:8ddce159f92f86d0d74b632d2394cb611ec46e296a7bbeef160140253ff2d286"
+  }, {
+    "seq" : 3,
+    "sql" : "SELECT COUNT(DISTINCT \"the_year\") AS \"c\"\nFROM \"time_by_day\"",
+    "rowCount" : 1,
+    "checksum" : "sha256:d95838638b57fb04835fc9103a8a6f4d724435aad81507e74d5cdb2ff57f7d77"
+  }, {
+    "seq" : 4,
+    "sql" : "SELECT COUNT(DISTINCT \"quarter\") AS \"c\"\nFROM \"time_by_day\"",
+    "rowCount" : 1,
+    "checksum" : "sha256:527778acb6ad1ce1601b64ecacb5e9db68199ab9b6ed3e2b64b3747632d91c94"
+  }, {
+    "seq" : 5,
+    "sql" : "SELECT \"the_year\", \"quarter\", \"product_family\", SUM(\"store_cost\") AS \"m0\", SUM(\"store_sales\") AS \"m1\"\nFROM (SELECT \"sales_fact_1997\".\"product_id\" AS \"product_id\", \"sales_fact_1997\".\"time_id\" AS \"time_id\", \"sales_fact_1997\".\"customer_id\" AS \"customer_id\", \"sales_fact_1997\".\"promotion_id\" AS \"promotion_id\", \"sales_fact_1997\".\"store_id\" AS \"store_id\", \"sales_fact_1997\".\"store_sales\" AS \"store_sales\", \"sales_fact_1997\".\"store_cost\" AS \"store_cost\", \"sales_fact_1997\".\"unit_sales\" AS \"unit_sales\", \"time_by_day\".\"time_id\" AS \"time_id0\", \"time_by_day\".\"the_date\" AS \"the_date\", \"time_by_day\".\"the_day\" AS \"the_day\", \"time_by_day\".\"the_month\" AS \"the_month\", \"time_by_day\".\"the_year\" AS \"the_year\", \"time_by_day\".\"day_of_month\" AS \"day_of_month\", \"time_by_day\".\"week_of_year\" AS \"week_of_year\", \"time_by_day\".\"month_of_year\" AS \"month_of_year\", \"time_by_day\".\"quarter\" AS \"quarter\", \"time_by_day\".\"fiscal_period\" AS \"fiscal_period\", \"product\".\"product_class_id\" AS \"product_class_id\", \"product\".\"product_id\" AS \"product_id0\", \"product\".\"brand_name\" AS \"brand_name\", \"product\".\"product_name\" AS \"product_name\", \"product\".\"SKU\" AS \"SKU\", \"product\".\"SRP\" AS \"SRP\", \"product\".\"gross_weight\" AS \"gross_weight\", \"product\".\"net_weight\" AS \"net_weight\", \"product\".\"recyclable_package\" AS \"recyclable_package\", \"product\".\"low_fat\" AS \"low_fat\", \"product\".\"units_per_case\" AS \"units_per_case\", \"product\".\"cases_per_pallet\" AS \"cases_per_pallet\", \"product\".\"shelf_width\" AS \"shelf_width\", \"product\".\"shelf_height\" AS \"shelf_height\", \"product\".\"shelf_depth\" AS \"shelf_depth\", \"product_class\".\"product_class_id\" AS \"product_class_id0\", \"product_class\".\"product_subcategory\" AS \"product_subcategory\", \"product_class\".\"product_category\" AS \"product_category\", \"product_class\".\"product_department\" AS \"product_department\", \"product_class\".\"product_family\" AS \"product_family\"\nFROM \"sales_fact_1997\"\nINNER JOIN \"time_by_day\" ON \"sales_fact_1997\".\"time_id\" = \"time_by_day\".\"time_id\"\nINNER JOIN \"product\" ON \"sales_fact_1997\".\"product_id\" = \"product\".\"product_id\"\nINNER JOIN \"product_class\" ON \"product\".\"product_class_id\" = \"product_class\".\"product_class_id\"\nWHERE \"time_by_day\".\"the_year\" = 1997) AS \"t\"\nWHERE \"t\".\"quarter\" = 'Q1'\nGROUP BY \"the_year\", \"quarter\", \"product_family\"",
+    "rowCount" : 3,
+    "checksum" : "sha256:3c830ceff09e97e6a49957a979175b01323f17e08b687a02ee43c8fb05d5e5cb"
+  } ]
+}
