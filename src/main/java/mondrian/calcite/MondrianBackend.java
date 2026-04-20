@@ -6,7 +6,7 @@ public enum MondrianBackend {
     public static final String PROPERTY = "mondrian.backend";
 
     public static MondrianBackend current() {
-        String raw = System.getProperty(PROPERTY, "legacy");
+        String raw = System.getProperty(PROPERTY, "calcite");
         try { return MondrianBackend.valueOf(raw.toUpperCase(java.util.Locale.ROOT)); }
         catch (IllegalArgumentException ex) { return LEGACY; }
     }

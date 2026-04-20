@@ -90,19 +90,24 @@ public class SegmentLoaderCalciteBackendTest {
     }
 
     @Test public void calcitePropertyFlipsCurrentBackend() {
-        // Legacy by default — guarantees the dispatch is a no-op for the
-        // 34/34 harness baseline.
-        assertSame(MondrianBackend.LEGACY, MondrianBackend.current());
+        // Calcite by default (Task 9 flip). -Dmondrian.backend=legacy is the
+        // kill switch; setting it to calcite explicitly is now a no-op but
+        // must still resolve to CALCITE.
+        assertSame(MondrianBackend.CALCITE, MondrianBackend.current());
 
         System.setProperty("mondrian.backend", "calcite");
         assertSame(MondrianBackend.CALCITE, MondrianBackend.current());
         assertTrue(MondrianBackend.current().isCalcite());
+
+        System.setProperty("mondrian.backend", "legacy");
+        assertSame(MondrianBackend.LEGACY, MondrianBackend.current());
     }
 
     @Test public void legacyBackendUnchangedByDispatch() {
-        // No mondrian.backend property set: SegmentLoader's dispatch must
-        // never touch CalcitePlannerAdapters, so the fallback counter must
-        // remain at zero from the perspective of a legacy run.
+        // -Dmondrian.backend=legacy: SegmentLoader's dispatch must never
+        // touch CalcitePlannerAdapters, so the fallback counter must remain
+        // at zero from the perspective of a legacy run.
+        System.setProperty("mondrian.backend", "legacy");
         assertSame(MondrianBackend.LEGACY, MondrianBackend.current());
         assertEquals(
             0L, CalcitePlannerAdapters.unsupportedFallbackCount());
