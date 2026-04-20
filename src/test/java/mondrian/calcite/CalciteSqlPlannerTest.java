@@ -20,6 +20,7 @@ import org.junit.Test;
 
 import javax.sql.DataSource;
 
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
@@ -337,6 +338,60 @@ public class CalciteSqlPlannerTest {
             sql.contains("'F'") || sql.contains("F"));
         assertTrue("expected 'M' in: " + sql,
             sql.contains("'M'") || sql.contains("M"));
+    }
+
+    /**
+     * Regression guard paired with the SegmentLoader ordering fix (Task M
+     * follow-up): when a request carries a TupleFilter, the filter's
+     * columns must <em>not</em> leak into the GROUP BY clause. Only the
+     * explicit {@link PlannerRequest.Builder#addGroupBy} columns and the
+     * measure projections are allowed in SELECT/GROUP BY. This locks
+     * down the translation shape that the
+     * {@code agg-distinct-count-quarters} equivalence test exercises.
+     */
+    @Test
+    public void tupleFilterDoesNotLeakIntoGroupBy() {
+        CalciteSqlPlanner planner = plannerFor(HsqldbSqlDialect.DEFAULT);
+        PlannerRequest req = PlannerRequest.builder("sales_fact_1997")
+            .addJoin(new PlannerRequest.Join(
+                "store", "store_id", "store_id"))
+            .addJoin(new PlannerRequest.Join(
+                "time_by_day", "time_id", "time_id"))
+            .addFilter(new PlannerRequest.Filter(
+                new PlannerRequest.Column("store", "store_state"), "CA"))
+            .addTupleFilter(new PlannerRequest.TupleFilter(
+                java.util.Arrays.asList(
+                    new PlannerRequest.Column("time_by_day", "the_year"),
+                    new PlannerRequest.Column("time_by_day", "quarter")),
+                java.util.Arrays.asList(
+                    java.util.Arrays.<Object>asList(1997, "Q1"),
+                    java.util.Arrays.<Object>asList(1997, "Q2"))))
+            .addGroupBy(new PlannerRequest.Column("store", "store_state"))
+            .addMeasure(new PlannerRequest.Measure(
+                PlannerRequest.AggFn.COUNT,
+                new PlannerRequest.Column(
+                    "sales_fact_1997", "customer_id"),
+                "m0",
+                true))
+            .build();
+        String sql = planner.plan(req);
+        assertNotNull(sql);
+        // Case-insensitive search — dialects vary on keyword case.
+        String upper = sql.toUpperCase();
+        int groupByIdx = upper.indexOf("GROUP BY");
+        assertTrue("expected GROUP BY in: " + sql, groupByIdx >= 0);
+        String groupByClause = sql.substring(groupByIdx);
+        assertTrue(
+            "GROUP BY must reference store_state: " + groupByClause,
+            groupByClause.toLowerCase().contains("store_state"));
+        assertFalse(
+            "tuple-filter column 'the_year' leaked into GROUP BY: "
+                + groupByClause,
+            groupByClause.toLowerCase().contains("the_year"));
+        assertFalse(
+            "tuple-filter column 'quarter' leaked into GROUP BY: "
+                + groupByClause,
+            groupByClause.toLowerCase().contains("quarter"));
     }
 
     /**
