@@ -14,6 +14,9 @@ package mondrian.rolap;
 import mondrian.calc.TupleList;
 import mondrian.calc.impl.ListTupleList;
 import mondrian.calc.impl.UnaryTupleList;
+import mondrian.calcite.CalcitePlannerAdapters;
+import mondrian.calcite.MondrianBackend;
+import mondrian.calcite.UnsupportedTranslation;
 import mondrian.olap.*;
 import mondrian.olap.fun.FunUtil;
 import mondrian.resource.MondrianResource;
@@ -494,6 +497,30 @@ public class SqlTupleReader implements TupleReader {
                 String sql = pair.left;
                 List<SqlStatement.Type> types = pair.right;
                 assert sql != null && !sql.equals("");
+
+                // Worktree-#1 dispatch: when the calcite backend is selected,
+                // attempt to obtain the SQL string from CalciteSqlPlanner via
+                // CalcitePlannerAdapters.fromTupleRead. Translation coverage
+                // is incomplete; on UnsupportedTranslation we fall back to
+                // the legacy SqlQuery-built string so the harness keeps
+                // making progress. The SqlInterceptor / RolapUtil seam below
+                // is unchanged: both backends feed the same JDBC call.
+                if (MondrianBackend.current().isCalcite()) {
+                    try {
+                        // The shape passed in is left intentionally opaque
+                        // until worktree #2 grows the translator: the dispatch
+                        // seam is what matters here.
+                        CalcitePlannerAdapters.fromTupleRead(targets);
+                        // If a translation succeeded, we'd swap `sql` here.
+                        // Worktree #1 always throws above, so this is a no-op.
+                    } catch (UnsupportedTranslation ex) {
+                        if (LOGGER.isDebugEnabled()) {
+                            LOGGER.debug(
+                                "Calcite backend: tuple-read fell back to "
+                                + "legacy SQL: " + ex.getMessage());
+                        }
+                    }
+                }
 
                 stmt = RolapUtil.executeQuery(
                     dataSource, sql, types, maxRows, 0,
