@@ -116,7 +116,7 @@ public final class CalciteSqlPlanner {
         if (req.isAggregation()) {
             List<RexNode> keys = new ArrayList<>();
             for (PlannerRequest.Column c : req.groupBy) {
-                keys.add(b.field(c.name));
+                keys.add(fieldRef(b, c));
             }
             List<RelBuilder.AggCall> aggs = new ArrayList<>();
             for (PlannerRequest.Measure m : req.measures) {
@@ -173,10 +173,24 @@ public final class CalciteSqlPlanner {
         return b.build();
     }
 
+    /** Table-qualified field ref when {@link PlannerRequest.Column#table}
+     *  is non-null; unqualified otherwise. Qualified lookup is required
+     *  when the same column name appears on more than one scan in the
+     *  input (classic example: {@code product_id} on both
+     *  {@code sales_fact_1997} and {@code product}). */
+    private static RexNode fieldRef(
+        RelBuilder b, PlannerRequest.Column c)
+    {
+        if (c.table == null) {
+            return b.field(c.name);
+        }
+        return b.field(c.table, c.name);
+    }
+
     private static RexNode filterRex(
         RelBuilder b, PlannerRequest.Filter f)
     {
-        RexNode col = b.field(f.column.name);
+        RexNode col = fieldRef(b, f.column);
         if (f.literals.size() == 1) {
             return b.equals(col, b.literal(f.literals.get(0)));
         }

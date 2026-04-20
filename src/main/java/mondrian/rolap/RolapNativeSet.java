@@ -71,8 +71,17 @@ public abstract class RolapNativeSet extends RolapNative {
      * Constraint for non empty {crossjoin, member.children,
      * member.descendants, level.members}
      */
-    protected static abstract class SetConstraint extends SqlContextConstraint {
+    public static abstract class SetConstraint extends SqlContextConstraint {
         CrossJoinArg[] args;
+
+        /**
+         * Read-only view of the constraint's CrossJoinArgs.
+         * Added for the Calcite translator (worktree #2).
+         * @return the original {@code args} array
+         */
+        public CrossJoinArg[] getArgs() {
+            return args;
+        }
 
         /**
          * Creates a SetConstraint.

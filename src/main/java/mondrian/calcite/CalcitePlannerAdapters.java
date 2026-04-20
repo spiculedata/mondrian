@@ -9,11 +9,16 @@
 */
 package mondrian.calcite;
 
+import mondrian.olap.Member;
 import mondrian.rolap.DefaultTupleConstraint;
 import mondrian.rolap.RolapAggregator;
 import mondrian.rolap.RolapAttribute;
 import mondrian.rolap.RolapCubeDimension;
 import mondrian.rolap.RolapCubeLevel;
+import mondrian.rolap.RolapEvaluator;
+import mondrian.rolap.RolapMeasureGroup;
+import mondrian.rolap.RolapMember;
+import mondrian.rolap.RolapNativeSet;
 import mondrian.rolap.RolapSchema;
 import mondrian.rolap.RolapStar;
 import mondrian.rolap.StarColumnPredicate;
@@ -28,6 +33,9 @@ import mondrian.rolap.agg.OrPredicate;
 import mondrian.rolap.agg.PredicateColumn;
 import mondrian.rolap.agg.Segment;
 import mondrian.rolap.agg.ValueColumnPredicate;
+import mondrian.rolap.sql.CrossJoinArg;
+import mondrian.rolap.sql.DescendantsCrossJoinArg;
+import mondrian.rolap.sql.MemberListCrossJoinArg;
 import mondrian.rolap.sql.TupleConstraint;
 
 import java.util.LinkedHashSet;
@@ -142,6 +150,21 @@ public final class CalcitePlannerAdapters {
             throw new UnsupportedTranslation(
                 "fromTupleRead: empty levels list");
         }
+        // Narrow to NonEmptyCrossJoinConstraint for this iteration. The
+        // two sibling SetConstraint subclasses that extend the same class
+        // — RolapNativeTopCount$TopCountConstraint and
+        // RolapNativeFilter$FilterConstraint — need extra translation
+        // surface (TopCount needs the sort-measure projected; Filter
+        // needs a HAVING-like measure predicate). Both are deferred to
+        // later worktree-#2 tasks. We gate by class-name so we don't
+        // have to wire a reverse dependency onto RolapNative* here.
+        if (constraint instanceof RolapNativeSet.SetConstraint
+            && "mondrian.rolap.RolapNativeCrossJoin$NonEmptyCrossJoinConstraint"
+                .equals(constraint.getClass().getName()))
+        {
+            return translateSetConstraintTupleRead(
+                levels, (RolapNativeSet.SetConstraint) constraint);
+        }
         if (!(constraint instanceof DefaultTupleConstraint)) {
             throw new UnsupportedTranslation(
                 "fromTupleRead: non-default TupleConstraint not yet "
@@ -213,6 +236,528 @@ public final class CalcitePlannerAdapters {
 
         b.distinct(true);
         return b.build();
+    }
+
+    /**
+     * Task N (worktree #2): translate a {@link RolapNativeSet.SetConstraint}
+     * into a <em>fact-rooted</em> {@link PlannerRequest}. This is the shape
+     * Mondrian emits for native {@code NON EMPTY CrossJoin(...)} and its
+     * single-arg variant {@code NON EMPTY &lt;level&gt;.members}: the fact
+     * table is the FROM root and every referenced dim table hangs off it
+     * via an inner equi-join, with a GROUP BY on every projected dim
+     * column so the result set enumerates tuples that appear in the fact.
+     *
+     * <p>Currently handles:
+     * <ul>
+     *   <li>{@link mondrian.rolap.RolapNativeCrossJoin.NonEmptyCrossJoinConstraint}
+     *       — the simplest {@link RolapNativeSet.SetConstraint} subclass,
+     *       which carries a {@link CrossJoinArg}[] and uses the context
+     *       evaluator's slicer for WHERE constraints.</li>
+     *   <li>Per-arg {@link MemberListCrossJoinArg} where every member lives
+     *       on the arg's level — emits an EQ filter (single member) or an
+     *       IN-list filter (multi-member) on the level's leaf key column.</li>
+     *   <li>Per-arg {@link DescendantsCrossJoinArg} with {@code member == null}
+     *       (level.members) — contributes projections + joins only, no
+     *       additional filters.</li>
+     * </ul>
+     *
+     * <p>Any other {@code CrossJoinArg} subclass — or a
+     * {@code MemberListCrossJoinArg} whose members span levels, or a
+     * {@code DescendantsCrossJoinArg} rooted at a real member — throws
+     * {@link UnsupportedTranslation} with the concrete class name so the
+     * shopping-list report surfaces the gap.
+     *
+     * <p>Slicer contribution: the evaluator's non-all, non-measure members
+     * are each translated into an EQ filter on the member's leaf key
+     * column. Members with composite keys are rejected (would need
+     * TupleFilter semantics that the corpus doesn't exercise yet).
+     */
+    private static PlannerRequest translateSetConstraintTupleRead(
+        List<RolapCubeLevel> levels,
+        RolapNativeSet.SetConstraint constraint)
+    {
+        CrossJoinArg[] args = constraint.getArgs();
+        if (args == null || args.length == 0) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: SetConstraint with empty CrossJoinArg[]");
+        }
+
+        // The `levels` list (from SqlTupleReader) enumerates the target
+        // levels; the `args` array includes those plus any extra args that
+        // safeToConstrainByOtherAxes pushed in (filter-only, no projection).
+        // NECJ (the NonEmptyCrossJoinFunDef path) does NOT push extras in —
+        // safeToConstrainByOtherAxes returns false for NonEmptyCrossJoinFunDef
+        // — so for the currently-supported constraint subclass every arg
+        // contributes one target level. We defer the "filter-only arg" case
+        // (SetConstraint subclasses over safe funs like CrossJoin) to a
+        // later task by rejecting when args.length != levels.size().
+        if (args.length != levels.size()) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: SetConstraint arg count " + args.length
+                + " != target level count " + levels.size()
+                + " (filter-only args not yet supported)");
+        }
+
+        // Evaluator + measure group — the fact table anchors the whole
+        // request. SetConstraint always carries at least one measure group
+        // (checkValidContext asserts this); we take the first.
+        Object evalObj = constraint.getEvaluator();
+        if (!(evalObj instanceof RolapEvaluator)) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: SetConstraint evaluator is not a "
+                + "RolapEvaluator (got "
+                + (evalObj == null ? "null" : evalObj.getClass().getName())
+                + ")");
+        }
+        RolapEvaluator evaluator = (RolapEvaluator) evalObj;
+        List<RolapMeasureGroup> mgs = constraint.getMeasureGroupList();
+        if (mgs == null || mgs.isEmpty()) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: SetConstraint has no measure group "
+                + "(virtual cube with no applicable base cube?)");
+        }
+        if (mgs.size() > 1) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: SetConstraint spans multiple measure groups "
+                + "(virtual cube UNION shape not yet supported; got "
+                + mgs.size() + ")");
+        }
+        RolapStar star = mgs.get(0).getStar();
+        RolapStar.Table factTable = star.getFactTable();
+        RolapSchema.PhysRelation factRel = factTable.getRelation();
+        if (!(factRel instanceof RolapSchema.PhysTable)) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: fact table is not a PhysTable ("
+                + (factRel == null ? "null" : factRel.getClass().getName())
+                + ")");
+        }
+        String factName = ((RolapSchema.PhysTable) factRel).getName();
+        PlannerRequest.Builder b = PlannerRequest.builder(factName);
+        Set<String> joinedAliases = new LinkedHashSet<>();
+        joinedAliases.add(factTable.getAlias());
+
+        // Per-target shape pre-computation.
+        TargetShape[] shapes = new TargetShape[levels.size()];
+        for (int i = 0; i < levels.size(); i++) {
+            try {
+                shapes[i] = shapeFor(levels.get(i));
+            } catch (UnsupportedTranslation ex) {
+                throw new UnsupportedTranslation(
+                    "fromTupleRead: SetConstraint target[" + i
+                    + "] unsupported — " + ex.getMessage());
+            }
+        }
+
+        // First pass: join every dim table referenced by any target's
+        // hierarchy walk. For a snowflake like Product→Product_Class we
+        // need `product` joined (the target leaf) AND `product_class` (the
+        // parent levels' home). Per-target ensureJoinedChain handles the
+        // fact→leaf hop; walking the parent-level's column relations via
+        // ensureJoinedChain picks up intermediates like product_class.
+        for (int i = 0; i < shapes.length; i++) {
+            TargetShape shape = shapes[i];
+            for (RolapSchema.PhysRelation rel :
+                collectNecjRelations(shape))
+            {
+                RolapStar.Table relStar = findStarTable(factTable, rel);
+                if (relStar == null) {
+                    throw new UnsupportedTranslation(
+                        "fromTupleRead: SetConstraint target[" + i + "] "
+                        + "referenced table " + rel.getAlias()
+                        + " is not reachable from fact "
+                        + factTable.getAlias());
+                }
+                if (relStar != factTable) {
+                    ensureJoinedChain(
+                        b, factTable, relStar, joinedAliases);
+                }
+            }
+        }
+
+        // Second pass: emit projections + group-by for each target in
+        // target order, and each target's CrossJoinArg filter contribution.
+        Set<String> projectedKeys = new LinkedHashSet<>();
+        Set<String> orderedKeys = new LinkedHashSet<>();
+        for (int i = 0; i < levels.size(); i++) {
+            TargetShape shape = shapes[i];
+            CrossJoinArg arg = args[i];
+            emitNecjTargetProjections(b, projectedKeys, shape);
+            addNecjOrderBy(b, orderedKeys, shape);
+            addCrossJoinArgFilter(b, shape, arg);
+        }
+
+        // Slicer contribution: any non-all, non-measure member in the
+        // evaluator context that isn't already pinned by a CrossJoinArg.
+        addSlicerFilters(b, evaluator, factTable, joinedAliases, args);
+
+        return b.build();
+    }
+
+    /**
+     * NECJ variant of {@link #emitTargetProjections}: mirrors the legacy
+     * {@code SqlTupleReader.addLevelMemberSql} outer loop, which walks
+     * every non-all level in the target's hierarchy from the root down to
+     * (and including) the target level. At each level it emits the
+     * attribute's key columns, then name, then caption — as both
+     * projections <em>and</em> GROUP BY entries. No ORDER BY. The
+     * resulting SELECT-list column count matches the
+     * {@link mondrian.rolap.LevelColumnLayout} the reader built from the
+     * same walk, so positional lookup at row-read time still lands on
+     * the right column.
+     */
+    private static void emitNecjTargetProjections(
+        PlannerRequest.Builder b, Set<String> seen, TargetShape t)
+    {
+        RolapCubeLevel leaf = t.level;
+        List<? extends RolapCubeLevel> hierarchyLevels =
+            leaf.getHierarchy().getLevelList();
+        int leafDepth = leaf.getDepth();
+        for (int i = 0; i <= leafDepth; i++) {
+            RolapCubeLevel currLevel = hierarchyLevels.get(i);
+            if (currLevel.isAll()) {
+                continue;
+            }
+            if (currLevel.getParentAttribute() != null) {
+                throw new UnsupportedTranslation(
+                    "fromTupleRead: SetConstraint hierarchy has a "
+                    + "parent-attribute level (" + currLevel + ")");
+            }
+            RolapAttribute attr = currLevel.getAttribute();
+            // The column's table alias comes from the column's own
+            // relation — on a snowflake like Product→Product_Class each
+            // level's key may live on a different table (product_class
+            // for family/department/category/subcategory, product for
+            // brand_name/product_name/product_id).
+            //
+            // Order mirrors legacy addLevelMemberSql per-level emission:
+            // (1) explicit orderBy columns, (2) keyList, (3) nameExp,
+            // (4) captionExp — all with dedup. For a single-key level
+            // where orderBy defaults to the nameExp column, the nameExp
+            // ends up *before* the key column in the SELECT list (e.g.
+            // [Product Name] emits product_name before product_id),
+            // matching legacy's cell-set column layout. Composite-key
+            // levels are different: the ancestor keys have already been
+            // emitted at their own level in this walk, so order-by for
+            // the leaf composite level simply dedups.
+            for (RolapSchema.PhysColumn o : attr.getOrderByList()) {
+                emitNecjProjection(b, seen, o, "order-by");
+            }
+            for (RolapSchema.PhysColumn kc : attr.getKeyList()) {
+                emitNecjProjection(b, seen, kc, "key");
+            }
+            RolapSchema.PhysColumn nameExp = attr.getNameExp();
+            if (nameExp != null) {
+                emitNecjProjection(b, seen, nameExp, "name");
+            }
+            RolapSchema.PhysColumn captionExp = attr.getCaptionExp();
+            if (captionExp != null) {
+                emitNecjProjection(b, seen, captionExp, "caption");
+            }
+        }
+    }
+
+    /**
+     * Collects every {@link RolapSchema.PhysRelation} referenced by a
+     * NECJ target's hierarchy walk (all non-all levels from root to leaf,
+     * every attribute's keyList / orderByList / nameExp / captionExp).
+     * Used to ensure every such table is joined to the request before
+     * any projection references its columns.
+     */
+    private static Set<RolapSchema.PhysRelation> collectNecjRelations(
+        TargetShape t)
+    {
+        Set<RolapSchema.PhysRelation> out = new LinkedHashSet<>();
+        RolapCubeLevel leaf = t.level;
+        List<? extends RolapCubeLevel> hierarchyLevels =
+            leaf.getHierarchy().getLevelList();
+        int leafDepth = leaf.getDepth();
+        for (int i = 0; i <= leafDepth; i++) {
+            RolapCubeLevel currLevel = hierarchyLevels.get(i);
+            if (currLevel.isAll()) {
+                continue;
+            }
+            RolapAttribute attr = currLevel.getAttribute();
+            addRelationIfReal(out, attr.getKeyList());
+            addRelationIfReal(out, attr.getOrderByList());
+            RolapSchema.PhysColumn nameExp = attr.getNameExp();
+            if (nameExp != null) {
+                addRelationIfReal(out,
+                    java.util.Collections.singletonList(nameExp));
+            }
+            RolapSchema.PhysColumn captionExp = attr.getCaptionExp();
+            if (captionExp != null) {
+                addRelationIfReal(out,
+                    java.util.Collections.singletonList(captionExp));
+            }
+        }
+        return out;
+    }
+
+    private static void addRelationIfReal(
+        Set<RolapSchema.PhysRelation> out, List<RolapSchema.PhysColumn> cols)
+    {
+        for (RolapSchema.PhysColumn c : cols) {
+            if (c.relation != null) {
+                out.add(c.relation);
+            }
+        }
+    }
+
+    /**
+     * Emits an ORDER BY ... ASC NULLS LAST clause on the target's key
+     * columns (parent-to-leaf, including every ancestor level's keys),
+     * deduped across targets by {@code (tableAlias, name)}. Legacy's
+     * NECJ SQL has no explicit ORDER BY, relying on HSQLDB's natural
+     * row order for the specific FROM/WHERE shape it emits. Calcite
+     * rewrites the plan to a different join topology, so the DB's
+     * "natural" order changes — we have to pin the axis order
+     * explicitly so the tuple reader returns members in the same
+     * sequence the legacy reader did.
+     */
+    private static void addNecjOrderBy(
+        PlannerRequest.Builder b, Set<String> seen, TargetShape t)
+    {
+        RolapCubeLevel leaf = t.level;
+        List<? extends RolapCubeLevel> hierarchyLevels =
+            leaf.getHierarchy().getLevelList();
+        int leafDepth = leaf.getDepth();
+        for (int i = 0; i <= leafDepth; i++) {
+            RolapCubeLevel currLevel = hierarchyLevels.get(i);
+            if (currLevel.isAll()) {
+                continue;
+            }
+            RolapAttribute attr = currLevel.getAttribute();
+            // Emit per-level ORDER BY in the same relative order as the
+            // per-level SELECT list: orderByList (name column by default for
+            // simple attributes) first, then keyList. For composite-key
+            // levels where orderBy == last key component, the dedup set
+            // collapses duplicates. This reproduces the axis sequence that
+            // legacy's tuple reader produces from HSQLDB's natural order:
+            // alphabetical by ancestor keys, then by leaf name column
+            // (e.g. [Product Name] sorts by product_name not product_id).
+            for (RolapSchema.PhysColumn o : attr.getOrderByList()) {
+                addNecjOrderByColumn(b, seen, o);
+            }
+            for (RolapSchema.PhysColumn kc : attr.getKeyList()) {
+                addNecjOrderByColumn(b, seen, kc);
+            }
+        }
+    }
+
+    private static void addNecjOrderByColumn(
+        PlannerRequest.Builder b, Set<String> seen, RolapSchema.PhysColumn c)
+    {
+        if (!(c instanceof RolapSchema.PhysRealColumn)) {
+            return;
+        }
+        String tableAlias = c.relation == null ? null : c.relation.getAlias();
+        String colName = ((RolapSchema.PhysRealColumn) c).name;
+        String tag = tableAlias + "." + colName;
+        if (seen.add(tag)) {
+            b.addOrderBy(
+                new PlannerRequest.OrderBy(
+                    new PlannerRequest.Column(tableAlias, colName),
+                    PlannerRequest.Order.ASC));
+        }
+    }
+
+    private static void emitNecjProjection(
+        PlannerRequest.Builder b,
+        Set<String> seen,
+        RolapSchema.PhysColumn col,
+        String role)
+    {
+        if (!(col instanceof RolapSchema.PhysRealColumn)) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: SetConstraint " + role
+                + " column is non-real (" + col.getClass().getName() + ")");
+        }
+        String tableAlias =
+            col.relation == null ? null : col.relation.getAlias();
+        PlannerRequest.Column projection = new PlannerRequest.Column(
+            tableAlias, ((RolapSchema.PhysRealColumn) col).name);
+        String tag = tableAlias + "." + projection.name;
+        if (seen.add(tag)) {
+            b.addProjection(projection);
+            b.addGroupBy(projection);
+        }
+    }
+
+    /**
+     * Emit WHERE contribution for a single {@link CrossJoinArg}. Supports
+     * {@link MemberListCrossJoinArg} (EQ / IN on the level's leaf key) and
+     * {@link DescendantsCrossJoinArg} with null member (no filter). Every
+     * other shape throws {@link UnsupportedTranslation}.
+     */
+    private static void addCrossJoinArgFilter(
+        PlannerRequest.Builder b, TargetShape shape, CrossJoinArg arg)
+    {
+        if (arg instanceof DescendantsCrossJoinArg) {
+            List<RolapMember> members = arg.getMembers();
+            if (members == null || members.isEmpty()) {
+                // Level.members — no additional filter.
+                return;
+            }
+            // Descendants of a real member — would require constraining
+            // every ancestor column, defer.
+            throw new UnsupportedTranslation(
+                "fromTupleRead: DescendantsCrossJoinArg rooted at a real "
+                + "member not yet supported (arg level="
+                + arg.getLevel() + ")");
+        }
+        if (arg instanceof MemberListCrossJoinArg) {
+            List<RolapMember> members = arg.getMembers();
+            if (members == null || members.isEmpty()) {
+                // Mondrian treats this as a hard-coded FALSE predicate.
+                b.universalFalse(true);
+                return;
+            }
+            // Every member must live on the arg's level; the leaf key
+            // column is what we filter on. For composite-key levels the
+            // members' keys are compound — reject for now (no corpus query
+            // uses this shape and TupleFilter would be needed).
+            List<RolapSchema.PhysColumn> keyList =
+                shape.attribute.getKeyList();
+            if (keyList.size() != 1) {
+                throw new UnsupportedTranslation(
+                    "fromTupleRead: MemberListCrossJoinArg on composite-key "
+                    + "level " + shape.level + " (keyList.size="
+                    + keyList.size() + ") not yet supported");
+            }
+            PlannerRequest.Column col =
+                new PlannerRequest.Column(shape.tableAlias, keyList.get(0)
+                    .toString().equals("") ? null
+                    : ((RolapSchema.PhysRealColumn) keyList.get(0)).name);
+            // Avoid the toString shortcut — just use the real column.
+            if (!(keyList.get(0) instanceof RolapSchema.PhysRealColumn)) {
+                throw new UnsupportedTranslation(
+                    "fromTupleRead: MemberListCrossJoinArg key is a non-real "
+                    + "column (" + keyList.get(0).getClass().getName() + ")");
+            }
+            col = new PlannerRequest.Column(
+                shape.tableAlias,
+                ((RolapSchema.PhysRealColumn) keyList.get(0)).name);
+            List<Object> values = new java.util.ArrayList<>(members.size());
+            for (RolapMember m : members) {
+                if (m.isCalculated() || m.isAll()) {
+                    throw new UnsupportedTranslation(
+                        "fromTupleRead: MemberListCrossJoinArg contains "
+                        + "calc/all member " + m);
+                }
+                values.add(memberKeyLiteral(m));
+            }
+            if (values.size() == 1) {
+                b.addFilter(new PlannerRequest.Filter(col, values.get(0)));
+            } else {
+                b.addFilter(
+                    new PlannerRequest.Filter(
+                        col, PlannerRequest.Operator.IN, values));
+            }
+            return;
+        }
+        throw new UnsupportedTranslation(
+            "fromTupleRead: unsupported CrossJoinArg subclass "
+            + arg.getClass().getName());
+    }
+
+    /** Extract a member's leaf key as a filter literal. Rejects composite
+     *  keys (List values) since those need TupleFilter semantics. */
+    private static Object memberKeyLiteral(RolapMember m) {
+        Object key = m.getKey();
+        if (key instanceof List) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: composite member key not yet supported "
+                + "(member=" + m + ")");
+        }
+        return key;
+    }
+
+    /**
+     * Slicer-driven WHERE: for every evaluator non-all, non-measure member
+     * not already pinned by a CrossJoinArg, emit an EQ filter on the
+     * member's leaf key column. Joins the member's dim chain into the
+     * request first if not already present.
+     */
+    private static void addSlicerFilters(
+        PlannerRequest.Builder b,
+        RolapEvaluator evaluator,
+        RolapStar.Table factTable,
+        Set<String> joinedAliases,
+        CrossJoinArg[] args)
+    {
+        // Hierarchies already pinned by CJ args — don't re-emit a filter
+        // for a member the arg already constrained.
+        Set<Object> argHierarchies = new LinkedHashSet<>();
+        for (CrossJoinArg a : args) {
+            if (a.getLevel() != null) {
+                argHierarchies.add(a.getLevel().getHierarchy());
+            }
+        }
+        RolapMember[] members = evaluator.getNonAllMembers();
+        for (RolapMember m : members) {
+            if (m.isMeasure() || m.isAll() || m.isCalculated()) {
+                continue;
+            }
+            if (argHierarchies.contains(m.getHierarchy())) {
+                continue;
+            }
+            // Mirror legacy removeCalculatedAndDefaultMembers: a member
+            // that is the hierarchy's default (outside the measures
+            // hierarchy) does not contribute a filter. Example: the Sales
+            // cube's Time dimension defaults to [Time].[1997] for the
+            // first loaded year; legacy's addContextConstraint drops it
+            // silently and the NECJ SQL has no WHERE on "the_year".
+            Member defaultMember = m.getHierarchy().getDefaultMember();
+            if (defaultMember != null && defaultMember.equals(m)) {
+                continue;
+            }
+            RolapCubeLevel memLevel;
+            if (!(m.getLevel() instanceof RolapCubeLevel)) {
+                throw new UnsupportedTranslation(
+                    "fromTupleRead: slicer member " + m
+                    + " level is not a RolapCubeLevel");
+            }
+            memLevel = (RolapCubeLevel) m.getLevel();
+            TargetShape shape;
+            try {
+                shape = shapeFor(memLevel);
+            } catch (UnsupportedTranslation ex) {
+                throw new UnsupportedTranslation(
+                    "fromTupleRead: slicer member " + m
+                    + " — " + ex.getMessage());
+            }
+            RolapStar.Table leafStar = findStarTable(factTable, shape.table);
+            if (leafStar == null) {
+                throw new UnsupportedTranslation(
+                    "fromTupleRead: slicer member " + m
+                    + " dim " + shape.tableAlias
+                    + " not reachable from fact "
+                    + factTable.getAlias());
+            }
+            if (leafStar != factTable) {
+                ensureJoinedChain(b, factTable, leafStar, joinedAliases);
+            }
+            List<RolapSchema.PhysColumn> keyList =
+                shape.attribute.getKeyList();
+            if (keyList.size() != 1) {
+                throw new UnsupportedTranslation(
+                    "fromTupleRead: slicer member " + m
+                    + " on composite-key level (keyList.size="
+                    + keyList.size() + ") not yet supported");
+            }
+            RolapSchema.PhysColumn kc = keyList.get(0);
+            if (!(kc instanceof RolapSchema.PhysRealColumn)) {
+                throw new UnsupportedTranslation(
+                    "fromTupleRead: slicer member " + m
+                    + " key is a non-real column");
+            }
+            PlannerRequest.Column col =
+                new PlannerRequest.Column(
+                    shape.tableAlias,
+                    ((RolapSchema.PhysRealColumn) kc).name);
+            b.addFilter(
+                new PlannerRequest.Filter(col, memberKeyLiteral(m)));
+        }
     }
 
     /** Pre-computed per-target binding: resolved table + attribute refs
