@@ -13,6 +13,7 @@ import mondrian.test.FoodMartHsqldbBootstrap;
 import mondrian.test.calcite.corpus.SmokeCorpus;
 import mondrian.test.calcite.corpus.SmokeCorpus.NamedMdx;
 
+import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -59,10 +60,17 @@ public class EquivalenceSmokeTest {
         FoodMartHsqldbBootstrap.ensureExtracted();
     }
 
+    @AfterClass
+    public static void writeReport() throws Exception {
+        HarnessReporter.writeHtml(
+            Paths.get("target/calcite-harness-report.html"));
+    }
+
     @Test
     public void equivalent() throws Exception {
         EquivalenceHarness h = new EquivalenceHarness(GOLDEN_DIR);
         HarnessResult r = h.run(mdx, CalcitePassThrough.class);
+        HarnessReporter.record(mdx.name, r);
         assertEquals(
             "drift: " + r.failureClass + " - " + r.detail,
             FailureClass.PASS, r.failureClass);
