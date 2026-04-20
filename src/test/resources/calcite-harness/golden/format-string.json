@@ -6,5 +6,20 @@
     "sql" : "select \"product_class\".\"product_family\" as \"c0\" from \"product\" as \"product\", \"product_class\" as \"product_class\" where \"product\".\"product_class_id\" = \"product_class\".\"product_class_id\" group by \"product_class\".\"product_family\" order by CASE WHEN \"product_class\".\"product_family\" IS NULL THEN 1 ELSE 0 END, \"product_class\".\"product_family\" ASC",
     "rowCount" : 3,
     "checksum" : "sha256:e3614f4f86801462eb83492a965f84de8ab6ef92f984c31756da41e8d0eba94f"
+  }, {
+    "seq" : 1,
+    "sql" : "select count(distinct \"product_family\") from \"product_class\"",
+    "rowCount" : 1,
+    "checksum" : "sha256:8ddce159f92f86d0d74b632d2394cb611ec46e296a7bbeef160140253ff2d286"
+  }, {
+    "seq" : 2,
+    "sql" : "select count(distinct \"the_year\") from \"time_by_day\"",
+    "rowCount" : 1,
+    "checksum" : "sha256:d95838638b57fb04835fc9103a8a6f4d724435aad81507e74d5cdb2ff57f7d77"
+  }, {
+    "seq" : 3,
+    "sql" : "select \"time_by_day\".\"the_year\" as \"c0\", \"product_class\".\"product_family\" as \"c1\", sum(\"sales_fact_1997\".\"store_cost\") as \"m0\", sum(\"sales_fact_1997\".\"store_sales\") as \"m1\" from \"sales_fact_1997\" as \"sales_fact_1997\", \"time_by_day\" as \"time_by_day\", \"product\" as \"product\", \"product_class\" as \"product_class\" where \"time_by_day\".\"the_year\" = 1997 and \"sales_fact_1997\".\"time_id\" = \"time_by_day\".\"time_id\" and \"sales_fact_1997\".\"product_id\" = \"product\".\"product_id\" and \"product\".\"product_class_id\" = \"product_class\".\"product_class_id\" group by \"time_by_day\".\"the_year\", \"product_class\".\"product_family\"",
+    "rowCount" : 3,
+    "checksum" : "sha256:c2a8ddfc92de0495f54e7c089535f93234a0eddf5e67a821d182fa2e9d81981f"
   } ]
 }

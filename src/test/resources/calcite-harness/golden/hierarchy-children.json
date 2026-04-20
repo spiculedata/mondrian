@@ -13,6 +13,11 @@
     "checksum" : "sha256:cffaa6cba69044d962d018316e1082c94bc303932e783129ce354d6ba58692fb"
   }, {
     "seq" : 2,
+    "sql" : "select count(distinct \"the_year\") from \"time_by_day\"",
+    "rowCount" : 1,
+    "checksum" : "sha256:d95838638b57fb04835fc9103a8a6f4d724435aad81507e74d5cdb2ff57f7d77"
+  }, {
+    "seq" : 3,
     "sql" : "select \"store\".\"store_state\" as \"c0\", \"time_by_day\".\"the_year\" as \"c1\", sum(\"sales_fact_1997\".\"unit_sales\") as \"m0\" from \"sales_fact_1997\" as \"sales_fact_1997\", \"store\" as \"store\", \"time_by_day\" as \"time_by_day\" where \"store\".\"store_state\" in ('CA', 'OR', 'WA') and \"time_by_day\".\"the_year\" = 1997 and \"sales_fact_1997\".\"store_id\" = \"store\".\"store_id\" and \"sales_fact_1997\".\"time_id\" = \"time_by_day\".\"time_id\" group by \"store\".\"store_state\", \"time_by_day\".\"the_year\"",
     "rowCount" : 3,
     "checksum" : "sha256:5bf12227f4f5dfd954f677f9695b6976867a0f3b388273a72688922d9ab65cc7"

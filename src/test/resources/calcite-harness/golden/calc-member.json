@@ -18,6 +18,11 @@
     "checksum" : "sha256:a2b3a5ab9dff0b9fec6942f9a147abe9d7b2c31ffef5f513b02a33f90359d19b"
   }, {
     "seq" : 3,
+    "sql" : "select count(distinct \"the_year\") from \"time_by_day\"",
+    "rowCount" : 1,
+    "checksum" : "sha256:d95838638b57fb04835fc9103a8a6f4d724435aad81507e74d5cdb2ff57f7d77"
+  }, {
+    "seq" : 4,
     "sql" : "select \"time_by_day\".\"the_year\" as \"c0\", \"product_class\".\"product_family\" as \"c1\", \"product_class\".\"product_department\" as \"c2\", sum(\"sales_fact_1997\".\"store_cost\") as \"m0\", sum(\"sales_fact_1997\".\"store_sales\") as \"m1\" from \"sales_fact_1997\" as \"sales_fact_1997\", \"time_by_day\" as \"time_by_day\", \"product\" as \"product\", \"product_class\" as \"product_class\" where \"time_by_day\".\"the_year\" = 1997 and \"sales_fact_1997\".\"time_id\" = \"time_by_day\".\"time_id\" and \"sales_fact_1997\".\"product_id\" = \"product\".\"product_id\" and \"product\".\"product_class_id\" = \"product_class\".\"product_class_id\" group by \"time_by_day\".\"the_year\", \"product_class\".\"product_family\", \"product_class\".\"product_department\"",
     "rowCount" : 23,
     "checksum" : "sha256:03ada2b708f0aed4eb179de2aca86a2ca22b09695872cb67b87f88e63f1b21ae"
