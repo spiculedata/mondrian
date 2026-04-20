@@ -94,6 +94,9 @@ public final class PlannerRequest {
     public final List<Column> projections;
     public final List<Filter> filters;
     public final List<OrderBy> orderBy;
+    /** Row-level DISTINCT on projections. Only valid when not aggregating.
+     *  Added for tuple-read / level-member dispatch (Task E). */
+    public final boolean distinct;
 
     private PlannerRequest(Builder b) {
         this.factTable = b.factTable;
@@ -103,6 +106,14 @@ public final class PlannerRequest {
         this.projections = List.copyOf(b.projections);
         this.filters = List.copyOf(b.filters);
         this.orderBy = List.copyOf(b.orderBy);
+        this.distinct = b.distinct;
+        if (this.distinct
+            && (!this.measures.isEmpty() || !this.groupBy.isEmpty()))
+        {
+            throw new IllegalStateException(
+                "PlannerRequest.distinct is mutually exclusive with "
+                + "aggregation (measures / group-by)");
+        }
     }
 
     public boolean isAggregation() {
@@ -121,6 +132,7 @@ public final class PlannerRequest {
         private final List<Column> projections = new ArrayList<>();
         private final List<Filter> filters = new ArrayList<>();
         private final List<OrderBy> orderBy = new ArrayList<>();
+        private boolean distinct;
 
         private Builder(String factTable) {
             if (factTable == null || factTable.isEmpty()) {
@@ -138,6 +150,7 @@ public final class PlannerRequest {
         }
         public Builder addFilter(Filter f) { filters.add(f); return this; }
         public Builder addOrderBy(OrderBy o) { orderBy.add(o); return this; }
+        public Builder distinct(boolean d) { this.distinct = d; return this; }
 
         public PlannerRequest build() {
             if (projections.isEmpty()

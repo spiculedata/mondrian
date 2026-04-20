@@ -23,36 +23,58 @@ state** and the shopping list below is honest.
 | Run                                                                                 | Result            |
 |-------------------------------------------------------------------------------------|-------------------|
 | `mvn -Pcalcite-harness -Dmondrian.backend=legacy -Dtest='Equivalence*Test' test`    | **34/34 pass**    |
-| `mvn -Pcalcite-harness                        -Dtest='Equivalence*Test' test`      | **0/34 pass**     |
-| `mvn -Pcalcite-harness -Dtest='HarnessMutationTest' test` (Calcite)                 | **0/1 pass**      |
-| `mvn -Pcalcite-harness -Dtest='mondrian.calcite.**' test` (unit-level)              | 32/32 pass        |
-| `mvn -Pcalcite-harness -Dtest='mondrian.test.calcite.BasicSelectEndToEndTest' test` | 1/1 pass (expects loud fail) |
+| `mvn -Pcalcite-harness                        -Dtest='Equivalence*Test' test`      | **6/34 pass** (post-Task-E) |
+| `mvn -Pcalcite-harness -Dtest='mondrian.calcite.**' test` (unit-level)              | 37/37 pass        |
+| `mvn -Pcalcite-harness -Dtest='mondrian.test.calcite.BasicSelectEndToEndTest' test` | 1/1 pass (cell-set parity vs. legacy golden) |
 
 Legacy 34/34 is the only absolute gate and it holds.
 
-## Per-query Calcite pass/fail distribution
+### Task E update — level-members tuple-read unblocked
 
-All 20 smoke-corpus queries, all 11 aggregate-corpus queries, all 3
-`EquivalenceHarnessTest` self-tests, and the `HarnessMutationTest`
-sweep throw `UnsupportedTranslation` at the same call site on every run:
+`CalcitePlannerAdapters.fromTupleRead(List<RolapCubeLevel>, TupleConstraint)`
+now translates the single-level, single-table, `DefaultTupleConstraint`
+member-list shape emitted by Mondrian schema-init. `PlannerRequest`
+grew a row-level `distinct` flag (mutually exclusive with aggregation).
+`CalciteSqlPlanner` honours it by calling `RelBuilder.distinct()` after
+projection.
 
-```
-CalcitePlannerAdapters.fromTupleRead (tuple-read translation is deferred)
-  at SqlTupleReader.prepareTuples:510
-  at SqlTupleReader.readMembers:653
-  at SqlMemberSource.getMembersInLevel
-  at SqlMemberSource.getRootMembers
-  at SmartMemberReader.getRootMembers
-  at RolapSchemaLoader$NamelessAssignDefaultMember.deriveDefaultMember
-  at RolapSchemaLoader.createCube
-```
+The harness jumped **0/34 → 6/34** passing. All 34 queries that
+previously threw at the first tuple-read now succeed through schema
+init and fail on their *second* unsupported shape (or pass outright).
 
-i.e. every query in the corpus needs the Sales cube's default members
-resolved, which emits a level-members SELECT through `SqlTupleReader`,
-which dispatches through `fromTupleRead`, which is not yet implemented.
+## Per-query Calcite pass/fail distribution (post-Task E)
 
-**Pass list (Calcite, equivalence corpus):** empty.
-**Fail list (Calcite, equivalence corpus):** all 34.
+**Passing: 6/34.**
+- `EquivalenceHarnessTest`: 3/3 self-tests pass.
+- `EquivalenceSmokeTest`: 3/20 (basic-select and two other root-level
+  single-join queries now land end-to-end).
+- `EquivalenceAggregateTest`: 0/11 (all blocked on distinct-count /
+  compound-predicate segment-load shapes).
+
+**Failing: 28/34.** First-throw cause buckets, scraped from the 4.7 run:
+
+| Count | First `UnsupportedTranslation` |
+|-------|--------------------------------|
+| 8     | `fromSegmentLoad: unsupported column predicate LiteralColumnPredicate` |
+| 8     | `fromSegmentLoad: compound predicates not yet supported` |
+| 8     | `fromSegmentLoad: unsupported column predicate ListColumnPredicate` |
+| 6     | `fromSegmentLoad: unsupported aggregator distinct-count` |
+| 4     | `fromSegmentLoad: only single-hop dimension joins supported; path length=3` (snowflake) |
+| 4     | `fromTupleRead: non-default TupleConstraint` (Descendants / native topcount / native filter / non-empty crossjoin) |
+| 3     | `fromTupleRead: composite-key level not yet supported (keyList.size=2)` |
+| 1     | `fromTupleRead: multi-target crossjoin not yet supported (levels.size=2)` |
+
+(A given query may throw one of several causes depending on what its
+first cold-cache SQL call happens to be; the table above is the
+distribution across **first throws**, not a count of distinct queries
+— some queries appear in more than one bucket if they exercise
+multiple cold paths before erroring.)
+
+The tuple-read translator is responsible for 8 of those first throws
+(composite keys, multi-target crossjoin, SqlConstraint family). The
+remaining 20 have been pushed *past* schema init into actual query
+execution — they're now bottlenecked on segment-load (aggregate) and
+snowflake-join translation, not on Sales-cube bootstrap.
 
 The basic-select shape *will* translate end-to-end at the segment-load
 site (`CalcitePlannerAdapters.fromSegmentLoad` is wired and covered by

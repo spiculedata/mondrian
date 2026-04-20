@@ -85,6 +85,41 @@ public class CalciteSqlPlannerTest {
     }
 
     @Test
+    public void distinctProjectionEmitsSelectDistinct() {
+        CalciteSqlPlanner planner = plannerFor(HsqldbSqlDialect.DEFAULT);
+        PlannerRequest req = PlannerRequest.builder("product_class")
+            .addProjection(
+                new PlannerRequest.Column(null, "product_family"))
+            .addOrderBy(new PlannerRequest.OrderBy(
+                new PlannerRequest.Column("product_class", "product_family"),
+                PlannerRequest.Order.ASC))
+            .distinct(true)
+            .build();
+        String sql = planner.plan(req);
+        assertNotNull(sql);
+        String lower = sql.toLowerCase();
+        assertTrue(
+            "expected SELECT DISTINCT (or equivalent) in: " + sql,
+            lower.contains("distinct") || lower.contains("group by"));
+        assertTrue("expected product_family in: " + sql,
+            lower.contains("product_family"));
+        assertTrue("expected ORDER BY in: " + sql,
+            lower.contains("order by"));
+    }
+
+    @Test(expected = IllegalStateException.class)
+    public void distinctWithAggregationRejected() {
+        PlannerRequest.builder("sales_fact_1997")
+            .addGroupBy(new PlannerRequest.Column(null, "time_id"))
+            .addMeasure(new PlannerRequest.Measure(
+                PlannerRequest.AggFn.SUM,
+                new PlannerRequest.Column(null, "unit_sales"),
+                "m"))
+            .distinct(true)
+            .build();
+    }
+
+    @Test
     public void dialectAwareness() {
         // Baseline HSQLDB dialect uses double-quoted identifiers; build a
         // custom-context variant using backtick identifier quoting so the

@@ -101,6 +101,9 @@ public final class CalciteSqlPlanner {
                 projs.add(b.field(c.name));
             }
             b.project(projs);
+            if (req.distinct) {
+                b.distinct();
+            }
         }
 
         if (!req.orderBy.isEmpty()) {

@@ -9,7 +9,10 @@
 */
 package mondrian.calcite;
 
+import mondrian.rolap.DefaultTupleConstraint;
 import mondrian.rolap.RolapAggregator;
+import mondrian.rolap.RolapAttribute;
+import mondrian.rolap.RolapCubeLevel;
 import mondrian.rolap.RolapSchema;
 import mondrian.rolap.RolapStar;
 import mondrian.rolap.StarColumnPredicate;
@@ -19,8 +22,11 @@ import mondrian.rolap.agg.GroupingSetsList;
 import mondrian.rolap.agg.ListColumnPredicate;
 import mondrian.rolap.agg.Segment;
 import mondrian.rolap.agg.ValueColumnPredicate;
+import mondrian.rolap.sql.TupleConstraint;
 
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -65,27 +71,204 @@ public final class CalcitePlannerAdapters {
         new AtomicLong();
 
     /**
-     * Attempt to translate a tuple-read context into a
-     * {@link PlannerRequest}. Currently always throws
-     * {@link UnsupportedTranslation}: the {@code SqlTupleReader.Target}
-     * structure (multi-target crossjoins, hierarchical level reads,
-     * approxRowCount overrides, native filters) does not map cleanly onto
-     * the worktree-#1 single-table projection shape without a deeper
-     * refactor of the tuple-reader. Coverage lands in worktree #2.
+     * Legacy opaque entry-point — always throws
+     * {@link UnsupportedTranslation}. Callers that carry typed context
+     * should prefer {@link #fromTupleRead(List, TupleConstraint)}.
      *
      * <p>The method exists now so the dispatch in
      * {@code SqlTupleReader.prepareTuples} is wired through a stable seam
      * — flipping translation on for a given shape is a one-file change
      * here, not a re-plumbing of the reader.
-     *
-     * @throws UnsupportedTranslation always (worktree #1).
      */
     public static PlannerRequest fromTupleRead(Object tupleReadContext) {
         TUPLE_READ_UNSUPPORTED_COUNT.incrementAndGet();
         UNSUPPORTED_COUNT.incrementAndGet();
         throw new UnsupportedTranslation(
-            "CalcitePlannerAdapters.fromTupleRead: tuple-read translation "
-            + "is deferred to a later worktree.");
+            "CalcitePlannerAdapters.fromTupleRead: opaque tuple-read "
+            + "context (" + (tupleReadContext == null ? "null"
+                : tupleReadContext.getClass().getName()) + ") not "
+            + "supported; pass a typed (levels, constraint) pair instead.");
+    }
+
+    /**
+     * Typed tuple-read entry-point. Worktree-#1 Task E: covers the
+     * single-level, single-table member-list shape emitted by Mondrian
+     * schema-init:
+     * <pre>
+     *   select distinct "t"."k" [, "t"."name", "t"."caption"]
+     *   from "t" as "t"
+     *   order by "t"."k" ASC NULLS LAST
+     * </pre>
+     *
+     * <p>Explicitly rejects — with a message that surfaces in downstream
+     * shopping-list reports:
+     * <ul>
+     *   <li>multi-target crossjoins ({@code levels.size() != 1});</li>
+     *   <li>any {@link TupleConstraint} other than
+     *       {@link DefaultTupleConstraint} (i.e. SqlConstraint-carrying
+     *       filters, context, member-key restrictions);</li>
+     *   <li>snowflake hierarchies (key column not on a single
+     *       {@link RolapSchema.PhysTable});</li>
+     *   <li>composite keys (more than one key column);</li>
+     *   <li>parent-child levels (parentAttribute set);</li>
+     *   <li>non-real key expressions ({@link RolapSchema.PhysCalcColumn}).</li>
+     * </ul>
+     *
+     * @throws UnsupportedTranslation when the shape is outside the
+     *     supported subset.
+     */
+    public static PlannerRequest fromTupleRead(
+        List<RolapCubeLevel> levels, TupleConstraint constraint)
+    {
+        try {
+            return translateTupleRead(levels, constraint);
+        } catch (UnsupportedTranslation ex) {
+            TUPLE_READ_UNSUPPORTED_COUNT.incrementAndGet();
+            UNSUPPORTED_COUNT.incrementAndGet();
+            throw ex;
+        }
+    }
+
+    private static PlannerRequest translateTupleRead(
+        List<RolapCubeLevel> levels, TupleConstraint constraint)
+    {
+        if (levels == null || levels.isEmpty()) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: empty levels list");
+        }
+        if (levels.size() != 1) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: multi-target crossjoin not yet supported "
+                + "(levels.size=" + levels.size() + ")");
+        }
+        if (!(constraint instanceof DefaultTupleConstraint)) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: non-default TupleConstraint not yet "
+                + "supported (got "
+                + (constraint == null
+                    ? "null"
+                    : constraint.getClass().getName())
+                + ")");
+        }
+        RolapCubeLevel level = levels.get(0);
+        if (level.isAll()) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: all-level read not yet supported");
+        }
+        if (level.isParentChild()) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: parent-child hierarchy not yet supported");
+        }
+        if (level.getParentAttribute() != null) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: parent-attribute hierarchy not yet "
+                + "supported");
+        }
+        RolapAttribute attribute = level.getAttribute();
+        List<RolapSchema.PhysColumn> keyList = attribute.getKeyList();
+        if (keyList == null || keyList.isEmpty()) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: level has no key columns");
+        }
+        if (keyList.size() != 1) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: composite-key level not yet supported "
+                + "(keyList.size=" + keyList.size() + ")");
+        }
+        RolapSchema.PhysColumn keyCol = keyList.get(0);
+        if (!(keyCol instanceof RolapSchema.PhysRealColumn)) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: non-real key expression "
+                + keyCol.getClass().getName());
+        }
+        RolapSchema.PhysRelation relation = keyCol.relation;
+        if (!(relation instanceof RolapSchema.PhysTable)) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: snowflake hierarchy / non-table relation "
+                + "not yet supported ("
+                + relation.getClass().getName() + ")");
+        }
+        RolapSchema.PhysTable table = (RolapSchema.PhysTable) relation;
+        String tableName = table.getName();
+        String tableAlias = table.getAlias();
+
+        // Assemble projections in the same order as addLevelMemberSql:
+        // (1) orderBy columns, (2) key columns, (3) nameExp, (4) captionExp.
+        // Columns that duplicate an earlier projection (same table+name) are
+        // skipped — matching the legacy `layoutBuilder.lookup` dedup.
+        PlannerRequest.Builder b = PlannerRequest.builder(tableName);
+        Set<String> seen = new LinkedHashSet<>();
+
+        // Order-by list.
+        PlannerRequest.Column firstKeyCol = null;
+        for (RolapSchema.PhysColumn o : attribute.getOrderByList()) {
+            PlannerRequest.Column c = asProjection(o, tableAlias, "order-by");
+            if (seen.add(c.name)) {
+                b.addProjection(c);
+            }
+            // order-by clause: sort on this column in ASC order, nulls last
+            // — mirrors the legacy emission (collateNullsLast=true).
+            b.addOrderBy(new PlannerRequest.OrderBy(
+                c, PlannerRequest.Order.ASC));
+        }
+
+        // Key column(s).
+        PlannerRequest.Column keyProj = asProjection(keyCol, tableAlias, "key");
+        if (seen.add(keyProj.name)) {
+            b.addProjection(keyProj);
+        }
+        firstKeyCol = keyProj;
+
+        // Name expression (optional).
+        RolapSchema.PhysColumn nameExp = attribute.getNameExp();
+        if (nameExp != null) {
+            PlannerRequest.Column nameProj =
+                asProjection(nameExp, tableAlias, "name");
+            if (seen.add(nameProj.name)) {
+                b.addProjection(nameProj);
+            }
+        }
+
+        // Caption expression (optional).
+        RolapSchema.PhysColumn captionExp = attribute.getCaptionExp();
+        if (captionExp != null) {
+            PlannerRequest.Column capProj =
+                asProjection(captionExp, tableAlias, "caption");
+            if (seen.add(capProj.name)) {
+                b.addProjection(capProj);
+            }
+        }
+
+        // If there were no order-by columns in the attribute, legacy still
+        // emits an ORDER BY on the key column (via SELECT_GROUP_ORDER /
+        // SELECT_ORDER clauses in addLevelMemberSql). Mirror that.
+        if (attribute.getOrderByList().isEmpty() && firstKeyCol != null) {
+            b.addOrderBy(new PlannerRequest.OrderBy(
+                firstKeyCol, PlannerRequest.Order.ASC));
+        }
+
+        b.distinct(true);
+        return b.build();
+    }
+
+    private static PlannerRequest.Column asProjection(
+        RolapSchema.PhysColumn col, String tableAlias, String role)
+    {
+        if (!(col instanceof RolapSchema.PhysRealColumn)) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: non-real " + role + " expression "
+                + col.getClass().getName());
+        }
+        if (col.relation == null
+            || !tableAlias.equals(col.relation.getAlias()))
+        {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: " + role + " column on different relation "
+                + "(expected alias=" + tableAlias + ", got "
+                + (col.relation == null ? "null" : col.relation.getAlias())
+                + ")");
+        }
+        return new PlannerRequest.Column(tableAlias, col.name);
     }
 
     /**

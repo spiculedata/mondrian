@@ -14,8 +14,12 @@ package mondrian.rolap;
 import mondrian.calc.TupleList;
 import mondrian.calc.impl.ListTupleList;
 import mondrian.calc.impl.UnaryTupleList;
+import mondrian.calcite.CalciteDialectMap;
+import mondrian.calcite.CalciteMondrianSchema;
 import mondrian.calcite.CalcitePlannerAdapters;
+import mondrian.calcite.CalciteSqlPlanner;
 import mondrian.calcite.MondrianBackend;
+import mondrian.calcite.PlannerRequest;
 import mondrian.olap.*;
 import mondrian.olap.fun.FunUtil;
 import mondrian.resource.MondrianResource;
@@ -35,6 +39,8 @@ import org.apache.log4j.Logger;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import javax.sql.DataSource;
 
 import static mondrian.rolap.LevelColumnLayout.OrderKeySource.*;
@@ -81,6 +87,33 @@ import static mondrian.rolap.LevelColumnLayout.OrderKeySource.*;
 public class SqlTupleReader implements TupleReader {
     private static final Logger LOGGER =
         Logger.getLogger(SqlTupleReader.class);
+
+    /** Per-DataSource cache of Calcite planners for tuple-read dispatch.
+     *  Keyed by DataSource identity (same cache-bust story as the
+     *  SegmentLoader's per-star planner cache). */
+    private static final ConcurrentMap<DataSource, CalciteSqlPlanner>
+        CALCITE_PLANNER_CACHE = new ConcurrentHashMap<>();
+
+    /** Test-only: drop the per-DataSource Calcite planner cache. */
+    public static void clearCalcitePlannerCache() {
+        CALCITE_PLANNER_CACHE.clear();
+    }
+
+    private static CalciteSqlPlanner plannerFor(DataSource dataSource) {
+        CalciteSqlPlanner cached = CALCITE_PLANNER_CACHE.get(dataSource);
+        if (cached != null) {
+            return cached;
+        }
+        CalciteMondrianSchema schema =
+            new CalciteMondrianSchema(dataSource, "mondrian");
+        CalciteSqlPlanner planner =
+            new CalciteSqlPlanner(
+                schema, CalciteDialectMap.forDataSource(dataSource));
+        CalciteSqlPlanner existing =
+            CALCITE_PLANNER_CACHE.putIfAbsent(dataSource, planner);
+        return existing != null ? existing : planner;
+    }
+
     protected final TupleConstraint constraint;
     protected final List<Target> targets = new ArrayList<Target>();
     int maxRows = 0;
@@ -504,13 +537,27 @@ public class SqlTupleReader implements TupleReader {
                 // there is no fallback. Translator coverage gaps surface as
                 // hard failures: that is the worktree-#2 shopping list.
                 if (MondrianBackend.current().isCalcite()) {
-                    // The shape passed in is left intentionally opaque
-                    // until worktree #2 grows the translator: the dispatch
-                    // seam is what matters here.
-                    CalcitePlannerAdapters.fromTupleRead(targets);
-                    // If a translation succeeded, we would swap `sql`
-                    // here. Worktree #1 always throws above, which under
-                    // the no-fallback policy fails the caller loudly.
+                    List<RolapCubeLevel> readLevels =
+                        new ArrayList<RolapCubeLevel>(partialTargets.size());
+                    for (Target t : partialTargets) {
+                        readLevels.add(t.getLevel());
+                    }
+                    PlannerRequest req =
+                        CalcitePlannerAdapters.fromTupleRead(
+                            readLevels, constraint);
+                    CalciteSqlPlanner planner = plannerFor(dataSource);
+                    String calciteSql = planner.plan(req);
+                    if (Boolean.getBoolean("mondrian.calcite.trace")) {
+                        System.err.println(
+                            "[calcite-ok tuple] " + calciteSql);
+                    }
+                    if (LOGGER.isDebugEnabled()) {
+                        LOGGER.debug(
+                            "Calcite backend: tuple-read translated.\n"
+                            + "  legacy:  " + sql + "\n"
+                            + "  calcite: " + calciteSql);
+                    }
+                    sql = calciteSql;
                 }
 
                 stmt = RolapUtil.executeQuery(
