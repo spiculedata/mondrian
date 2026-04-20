@@ -13,23 +13,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 
-import mondrian.olap.Connection;
-import mondrian.olap.DriverManager;
-import mondrian.olap.MondrianProperties;
-import mondrian.olap.Query;
-import mondrian.olap.Result;
-import mondrian.olap.Util;
 import mondrian.rolap.sql.SqlInterceptor;
-import mondrian.test.TestContext;
 import mondrian.test.calcite.corpus.SmokeCorpus.NamedMdx;
 
-import javax.sql.DataSource;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
 import java.util.Objects;
 
 /**
@@ -53,7 +42,7 @@ import java.util.Objects;
  */
 public final class EquivalenceHarness {
 
-    public static final String SYS_PROP = "mondrian.sqlInterceptor";
+    public static final String SYS_PROP = FoodMartCapture.INTERCEPTOR_SYS_PROP;
 
     private final Path goldenDir;
     private final ObjectMapper mapper;
@@ -72,7 +61,8 @@ public final class EquivalenceHarness {
         Objects.requireNonNull(interceptorClass, "interceptorClass");
 
         // --- Run A: classic Mondrian, no interceptor ---
-        CapturedRun runA = executeCapturing(mdx);
+        FoodMartCapture.CapturedRun runA =
+            FoodMartCapture.executeCold(mdx, null);
 
         // --- Gate 1: BASELINE_DRIFT ---
         Path goldenFile = goldenDir.resolve(mdx.name + ".json");
@@ -92,18 +82,8 @@ public final class EquivalenceHarness {
         }
 
         // --- Run B: interceptor installed via system property ---
-        String prev = System.getProperty(SYS_PROP);
-        CapturedRun runB;
-        try {
-            System.setProperty(SYS_PROP, interceptorClass.getName());
-            runB = executeCapturing(mdx);
-        } finally {
-            if (prev == null) {
-                System.clearProperty(SYS_PROP);
-            } else {
-                System.setProperty(SYS_PROP, prev);
-            }
-        }
+        FoodMartCapture.CapturedRun runB =
+            FoodMartCapture.executeCold(mdx, interceptorClass.getName());
 
         // --- Gate 2: CELL_SET_DRIFT ---
         if (!Objects.equals(runA.cellSet, runB.cellSet)) {
@@ -153,88 +133,14 @@ public final class EquivalenceHarness {
             runB.cellSet, runB.executions);
     }
 
-    // ---------- internals ----------
-
-    private static final class CapturedRun {
-        final String cellSet;
-        final List<CapturedExecution> executions;
-
-        CapturedRun(String cellSet, List<CapturedExecution> executions) {
-            this.cellSet = cellSet;
-            this.executions = executions;
-        }
-    }
-
-    /**
-     * Executes one MDX against a fresh RolapConnection with a SqlCapture-
-     * wrapped DataSource. Mirrors the setup in {@link BaselineRecorder} but
-     * runs a single query rather than iterating a corpus. Flushes the schema
-     * cache first so Run A and Run B both see cold caches.
-     */
-    private CapturedRun executeCapturing(NamedMdx mdx) {
-        // Flush schema cache on a throwaway connection (mirrors BaselineRecorder).
-        Connection flushConn = DriverManager.getConnection(
-            baseProperties(), null, null);
-        try {
-            flushConn.getCacheControl(null).flushSchemaCache();
-        } finally {
-            flushConn.close();
-        }
-
-        DataSource underlying = buildUnderlyingDataSource();
-        SqlCapture capture = new SqlCapture(underlying);
-
-        Util.PropertyList props = baseProperties();
-        // Disable schema pool so capture ordering is stable across runs.
-        props.put("UseSchemaPool", "false");
-
-        Connection conn = DriverManager.getConnection(props, null, capture);
-        try {
-            capture.drain();
-            Query parsed = conn.parseQuery(mdx.mdx);
-            Result result = conn.execute(parsed);
-            String cellSet;
-            try {
-                cellSet = TestContext.toString(result);
-            } finally {
-                result.close();
-            }
-            List<CapturedExecution> execs =
-                Collections.unmodifiableList(new ArrayList<>(capture.drain()));
-            return new CapturedRun(cellSet, execs);
-        } finally {
-            conn.close();
-        }
-    }
-
-    private Util.PropertyList baseProperties() {
-        return Util.parseConnectString(TestContext.getDefaultConnectString());
-    }
-
-    private DataSource buildUnderlyingDataSource() {
-        String jdbcUrl =
-            MondrianProperties.instance().FoodmartJdbcURL.get();
-        String user =
-            MondrianProperties.instance().TestJdbcUser.get();
-        String password =
-            MondrianProperties.instance().TestJdbcPassword.get();
-        org.hsqldb.jdbc.jdbcDataSource ds =
-            new org.hsqldb.jdbc.jdbcDataSource();
-        ds.setDatabase(jdbcUrl);
-        if (user != null) {
-            ds.setUser(user);
-        }
-        if (password != null) {
-            ds.setPassword(password);
-        }
-        return ds;
-    }
-
     /**
      * Returns {@code null} if runA matches the golden; otherwise a human-
      * readable description of the first mismatch.
      */
-    private static String compareAgainstGolden(JsonNode golden, CapturedRun run) {
+    private static String compareAgainstGolden(
+        JsonNode golden,
+        FoodMartCapture.CapturedRun run)
+    {
         String goldenCellSet = golden.path("cellSet").asText();
         if (!Objects.equals(goldenCellSet, run.cellSet)) {
             return "cellSet differs from golden\n--- golden ---\n"
