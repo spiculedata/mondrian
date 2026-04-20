@@ -449,3 +449,77 @@ first-throw (e.g. RolapNativeTopCount), that's fine — bucket it for
 the next task."
 
 Legacy harness: 32/32 (translator-only change).
+
+### Task L update — snowflake chain in `fromTupleRead`
+
+`CalcitePlannerAdapters.fromTupleRead` now walks the dimension-key path
+(`RolapCubeDimension.getKeyPath(firstKey)`) for every target whose key
+columns live on a snowflaked leaf reached through intermediate dim
+tables. Each intermediate hop — every relation between the dim-key
+table and the leaf, in leaf→ancestor order — is emitted as a
+`PlannerRequest.Join(INNER, leftTable=…)` edge before the target's
+projections. The first edge's `leftTable` stays `null` so the renderer
+resolves the FK against the leaf scan; subsequent edges name the
+previous dim alias so multi-hop chains disambiguate repeated column
+names (e.g. `product_class_id`).
+
+For FoodMart's `[Product].[Products].[Product Department]` this
+materialises as a single edge from `product_class` back to `product`
+on `product_class_id`. Legacy tuple-read emits (from
+`golden-legacy/slicer-where.json`):
+
+```sql
+-- legacy
+SELECT "product_class"."product_family" AS "c0",
+       "product_class"."product_department" AS "c1"
+FROM "product" AS "product", "product_class" AS "product_class"
+WHERE "product"."product_class_id" = "product_class"."product_class_id"
+GROUP BY "product_class"."product_family", "product_class"."product_department"
+ORDER BY …
+```
+
+Calcite now emits (captured under `-Dmondrian.calcite.trace=true` on
+`slicer-where`):
+
+```sql
+-- calcite (post-Task-L)
+SELECT "product_class"."product_family", "product_class"."product_department"
+FROM "product_class"
+INNER JOIN "product"
+  ON "product_class"."product_class_id" = "product"."product_class_id"
+GROUP BY "product_class"."product_family", "product_class"."product_department"
+ORDER BY …
+```
+
+Semantically equivalent — the INNER JOIN filters the orphan catalog
+rows (`[Drink].[Baking Goods]`, `[Food].[Packaged Foods]`, etc) that
+`FROM "product_class"` alone would leak into the member list.
+
+`TupleReadSnowflakeTest` pins the behaviour across three cases:
+`[Product Department]` (composite key, single-hop chain),
+`[Product Family]` (single key on the same snowflake), and
+`[Time].[Year]` (flat — no chain).
+
+The harness moved **21/34 → 23/34**: the three drift queries the task
+brief called out (`calc-member`, `slicer-where`, `order`) all pass.
+`iif` and `crossjoin` remain blocked on separate drifts / unsupported
+shapes, not the snowflake gate.
+
+Legacy harness: 34/34 (translator-only change).
+
+### Post-Task-L first-throw bucket distribution
+
+| Count | First `UnsupportedTranslation` / drift signal |
+|-------|-----------------------------------------------|
+| 3     | `fromTupleRead: non-default TupleConstraint … RolapNativeTopCount$TopCountConstraint` |
+| 2     | `fromTupleRead: non-default TupleConstraint … RolapNativeFilter$FilterConstraint` |
+| 2     | `fromTupleRead: non-default TupleConstraint … RolapNativeCrossJoin$NonEmptyCrossJoinConstraint` |
+| 2     | `fromSegmentLoad: OrPredicate across columns not yet supported (cols=2)` |
+| 2     | `fromSegmentLoad: OrPredicate across columns not yet supported (cols=1)` |
+| 1     | `fromTupleRead: non-default TupleConstraint … DescendantsConstraint` |
+| 1     | `LEGACY_DRIFT` / `SQL_ROWSET_DRIFT` on cellSet (`agg-distinct-count-customers-levels` — pre-existing; unrelated to snowflake) |
+
+The `LEGACY_DRIFT` row on composite-key projection ordering has dropped
+off (no query fails on that signal any more). The dominant remaining
+blocker is the `TupleConstraint` family (8 queries across
+TopCount/Filter/CrossJoin/Descendants).

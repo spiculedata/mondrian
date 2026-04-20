@@ -12,6 +12,7 @@ package mondrian.calcite;
 import mondrian.rolap.DefaultTupleConstraint;
 import mondrian.rolap.RolapAggregator;
 import mondrian.rolap.RolapAttribute;
+import mondrian.rolap.RolapCubeDimension;
 import mondrian.rolap.RolapCubeLevel;
 import mondrian.rolap.RolapSchema;
 import mondrian.rolap.RolapStar;
@@ -183,12 +184,29 @@ public final class CalcitePlannerAdapters {
         Set<String> crossJoined = new LinkedHashSet<>();
         crossJoined.add(first.tableAlias);
 
+        // Task L: stitch any snowflake chain joins (dim-key-table → leaf)
+        // in before target projections so orphan catalog rows get filtered
+        // out of DISTINCT member lists. Emitted in request order before
+        // the projections so the RelBuilder stack resolves LHS correctly
+        // (first edge joins leaf ↔ parent, etc).
+        for (PlannerRequest.Join edge : first.dimChain) {
+            b.addJoin(edge);
+            crossJoined.add(edge.dimTable);
+        }
         emitTargetProjections(b, seen, first);
         for (int i = 1; i < shapes.length; i++) {
             TargetShape t = shapes[i];
             if (!crossJoined.contains(t.tableAlias)) {
                 b.addJoin(PlannerRequest.Join.cross(t.tableName));
                 crossJoined.add(t.tableAlias);
+            }
+            // Emit this target's snowflake chain too (same reasoning as
+            // above). Cross-target chains rarely share edges so dedup by
+            // alias is a correctness no-op but keeps the renderer stable.
+            for (PlannerRequest.Join edge : t.dimChain) {
+                if (crossJoined.add(edge.dimTable)) {
+                    b.addJoin(edge);
+                }
             }
             emitTargetProjections(b, seen, t);
         }
@@ -197,24 +215,39 @@ public final class CalcitePlannerAdapters {
         return b.build();
     }
 
-    /** Pre-computed per-target binding: resolved table + attribute refs.
-     *  Shared by the single-target and multi-target paths. */
+    /** Pre-computed per-target binding: resolved table + attribute refs
+     *  plus any snowflake chain from the dimension-key table to the leaf
+     *  (Task L). Shared by the single-target and multi-target paths. */
     private static final class TargetShape {
         final RolapCubeLevel level;
         final RolapAttribute attribute;
         final RolapSchema.PhysTable table;
         final String tableName;
         final String tableAlias;
+        /**
+         * Chain of {@link PlannerRequest.Join} edges that must be stitched
+         * into the request <em>before</em> this target's projections, so
+         * orphan catalog rows on the leaf (rows with no corresponding
+         * dim-key row) are filtered out. Emitted in leaf→ancestor order
+         * (first edge joins the leaf's immediate parent, etc). The first
+         * edge uses {@code leftTable=null} so the renderer resolves the
+         * factKey against the leaf scan (LHS of the built rel); subsequent
+         * edges use {@code leftTable=} the previous dim alias. Empty for
+         * flat (non-snowflake) levels.
+         */
+        final List<PlannerRequest.Join> dimChain;
         TargetShape(
             RolapCubeLevel level,
             RolapAttribute attribute,
-            RolapSchema.PhysTable table)
+            RolapSchema.PhysTable table,
+            List<PlannerRequest.Join> dimChain)
         {
             this.level = level;
             this.attribute = attribute;
             this.table = table;
             this.tableName = table.getName();
             this.tableAlias = table.getAlias();
+            this.dimChain = dimChain;
         }
     }
 
@@ -270,7 +303,162 @@ public final class CalcitePlannerAdapters {
                     + ")");
             }
         }
-        return new TargetShape(level, attribute, table);
+        // Task L: if the level's key columns live on a snowflaked dim table
+        // reached through intermediate dim tables (e.g. [Product Department]
+        // keyed on product_class, reached via product → product_class), emit
+        // the full chain as join edges so orphan catalog rows on the leaf
+        // table don't leak into the member list. Legacy tuple-read
+        // (SqlQueryBuilder.flush + joinToDimensionKey) joins the dim-key
+        // table back to the leaf for exactly this reason; see
+        // golden-legacy/slicer-where.json for the canonical shape
+        // (FROM "product","product_class" WHERE "product"."product_class_id"
+        // = "product_class"."product_class_id").
+        List<PlannerRequest.Join> dimChain =
+            computeTupleReadDimChain(level, table);
+        return new TargetShape(level, attribute, table, dimChain);
+    }
+
+    /**
+     * Returns the chain of joins from the level's dimension-key table down
+     * to the leaf {@code keyTable}, excluding the leaf itself (which is
+     * already the target's scan). Empty when the dimension is flat (key
+     * columns live on the dim-key table). Returned edges are ordered so
+     * that callers can emit them in request order (leaf-to-ancestor):
+     * the first edge joins the leaf's immediate parent, the second the
+     * grandparent, etc. Each edge's {@code leftTable} is null for the
+     * first edge (LHS is the leaf scan) and set to the previous edge's
+     * dim alias for subsequent edges so the renderer can disambiguate
+     * column names shared across the chain.
+     */
+    private static List<PlannerRequest.Join> computeTupleReadDimChain(
+        RolapCubeLevel level, RolapSchema.PhysTable keyTable)
+    {
+        RolapCubeDimension dim = level.getDimension();
+        if (dim == null) {
+            return java.util.Collections.emptyList();
+        }
+        RolapSchema.PhysRelation dimKeyTable;
+        try {
+            dimKeyTable = dim.getKeyTable();
+        } catch (RuntimeException ex) {
+            // Some synthetic dimensions (e.g. Measures) throw here; a
+            // level on such a dim never reaches a snowflake shape.
+            return java.util.Collections.emptyList();
+        }
+        if (dimKeyTable == null || dimKeyTable == keyTable) {
+            return java.util.Collections.emptyList();
+        }
+        RolapSchema.PhysColumn firstKey =
+            level.getAttribute().getKeyList().get(0);
+        RolapSchema.PhysPath path;
+        try {
+            path = dim.getKeyPath(firstKey);
+        } catch (RuntimeException ex) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: cannot resolve join path from dimension "
+                + "key " + dimKeyTable.getAlias() + " to key column "
+                + firstKey + ": " + ex.getMessage());
+        }
+        // path.hopList: Hop(dimKeyTable, null), Hop(next, link1), …,
+        //   Hop(leaf, linkN). We want every hop EXCEPT the leaf, emitted
+        //   in reverse (leaf-adjacent first) so PlannerRequest Join
+        //   sequencing works out.
+        List<RolapSchema.PhysHop> hops = path.hopList;
+        if (hops.isEmpty() || hops.get(hops.size() - 1).relation != keyTable) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: dim-key path does not end at leaf table "
+                + keyTable.getAlias()
+                + " (got " + (hops.isEmpty()
+                    ? "<empty>"
+                    : hops.get(hops.size() - 1).relation.getAlias())
+                + ")");
+        }
+        List<PlannerRequest.Join> out = new java.util.ArrayList<>();
+        String prevAlias = null; // null => LHS is the leaf scan
+        // Walk from the leaf's immediate parent upwards.
+        for (int i = hops.size() - 2; i >= 0; i--) {
+            RolapSchema.PhysHop hop = hops.get(i);
+            RolapSchema.PhysRelation ancestor = hop.relation;
+            if (!(ancestor instanceof RolapSchema.PhysTable)) {
+                throw new UnsupportedTranslation(
+                    "fromTupleRead: non-table dim in chain: "
+                    + (ancestor == null
+                        ? "null"
+                        : ancestor.getClass().getName()));
+            }
+            // The link connecting this ancestor to the next-child-toward-
+            // leaf lives on hops.get(i+1).link. For the canonical
+            // fact→product→product_class snowflake the link targetRelation
+            // is `product` (FK side) and sourceKey.relation is
+            // `product_class` (PK side); but either orientation must
+            // work mid-chain.
+            RolapSchema.PhysHop nextChildHop = hops.get(i + 1);
+            RolapSchema.PhysLink link = nextChildHop.link;
+            if (link == null) {
+                throw new UnsupportedTranslation(
+                    "fromTupleRead: null link on dim hop "
+                    + nextChildHop.relation.getAlias());
+            }
+            RolapSchema.PhysRelation childRel = nextChildHop.relation;
+            List<RolapSchema.PhysColumn> fkCols = link.getColumnList();
+            if (fkCols.size() != 1) {
+                throw new UnsupportedTranslation(
+                    "fromTupleRead: composite FK keys not supported in "
+                    + "snowflake chain (arity=" + fkCols.size() + ")");
+            }
+            RolapSchema.PhysColumn fkCol = fkCols.get(0);
+            RolapSchema.PhysKey srcKey = link.getSourceKey();
+            List<RolapSchema.PhysColumn> pkCols = srcKey.getColumnList();
+            if (pkCols.size() != 1) {
+                throw new UnsupportedTranslation(
+                    "fromTupleRead: composite PK keys not supported in "
+                    + "snowflake chain (arity=" + pkCols.size() + ")");
+            }
+            RolapSchema.PhysColumn pkCol = pkCols.get(0);
+            if (!(fkCol instanceof RolapSchema.PhysRealColumn)
+                || !(pkCol instanceof RolapSchema.PhysRealColumn))
+            {
+                throw new UnsupportedTranslation(
+                    "fromTupleRead: non-real FK/PK column in snowflake "
+                    + "chain edge " + ancestor.getAlias() + "→"
+                    + childRel.getAlias());
+            }
+            String fkName = ((RolapSchema.PhysRealColumn) fkCol).name;
+            String pkName = ((RolapSchema.PhysRealColumn) pkCol).name;
+            // Figure out which side of the link is the "child" (LHS, i.e.
+            // closer to the leaf in our reverse walk) vs the "ancestor".
+            // The renderer expects leftKey on the LHS table and dimKey on
+            // the RHS. RHS = ancestor here (we're joining ancestor onto
+            // an already-built chain rooted at leaf).
+            String leftKey;
+            String rightKey;
+            if (link.targetRelation == childRel
+                && srcKey.getRelation() == ancestor)
+            {
+                // Child holds FK (e.g. product.product_class_id → product_class.product_class_id).
+                leftKey = fkName;
+                rightKey = pkName;
+            } else if (link.targetRelation == ancestor
+                && srcKey.getRelation() == childRel)
+            {
+                // Ancestor holds FK, child holds PK — reverse link.
+                leftKey = pkName;
+                rightKey = fkName;
+            } else {
+                throw new UnsupportedTranslation(
+                    "fromTupleRead: PhysLink endpoints do not match "
+                    + "ancestor/child pair ("
+                    + ancestor.getAlias() + " / " + childRel.getAlias()
+                    + ")");
+            }
+            String ancestorAlias = ancestor.getAlias();
+            PlannerRequest.Join edge = new PlannerRequest.Join(
+                ancestorAlias, leftKey, rightKey,
+                PlannerRequest.JoinKind.INNER, prevAlias);
+            out.add(edge);
+            prevAlias = ancestorAlias;
+        }
+        return out;
     }
 
     /**
