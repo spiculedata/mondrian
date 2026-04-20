@@ -284,9 +284,76 @@ Two subagent attempts on Task U surfaced two related architecture gaps:
 ### Conclusion
 
 - No MvRegistry production code is shipped in worktree #3. Worktree #4 already plans to delete `aggmatcher/` wholesale, consistent with it being inactive.
-- No `MvHitTest` is added — there's no agg-table MV code for it to assert against.
-- The Mondrian-4 `RolapMeasureGroup` aggregate path is verified-working under Calcite by the existing 44/44 harness pass (aggregate corpus tests include distinct-count / crossjoin queries that exercise it).
+- The Mondrian-4 `RolapMeasureGroup` aggregate path is verified-working under Calcite by the existing harness pass; Task U.1 below makes that verification explicit.
 - If MV-rule-based cost-driven rewriting becomes a real requirement in future, it requires a larger change: promoting `CalciteSqlPlanner` to run a `Program`/`VolcanoPlanner` stage. That is out of scope here.
+
+## Task U.1 — Mondrian-4 aggregate MeasureGroup path proof
+
+**Status:** Complete. 4/4 green under both backends.
+
+### Motivation
+
+The earlier Task-U investigation noted that the existing `EquivalenceAggregateTest` corpus uses `[Customer Count]` (distinct-count, non-additive) on shapes no declared agg satisfies — so `RolapGalaxy.findAgg` always rejected the aggregates and the 44/44 harness pass proved nothing about the Mondrian-4 aggregate MeasureGroup execution path under Calcite.
+
+### Deliverables
+
+- `src/test/java/mondrian/test/calcite/corpus/MvHitCorpus.java` — 4 named MDX queries, each paired with the set of agg-table names that are acceptable hits.
+- `src/test/java/mondrian/test/calcite/MvHitTest.java` — parameterised test. For each query, runs once under `-Dmondrian.backend=legacy` and once under `calcite` with `SqlCapture` recording ALL emitted SQL, asserts (a) at least one captured statement's `FROM` clause references one of the expected agg tables, and (b) cell-set byte-identity between the two backends.
+
+### Queries and agg-table hits (verified via `SqlCapture`)
+
+| # | Query | Expected | Actual (legacy + calcite) |
+|---|-------|----------|---------------------------|
+| 1 | `agg-g-ms-pcat-family-gender` — Unit Sales × Product Family × Gender | `agg_g_ms_pcat_sales_fact_1997` | `agg_g_ms_pcat_sales_fact_1997` |
+| 2 | `agg-c-year-country` — Unit Sales × Year × Store Country | `agg_c_14` or `agg_c_special` | `agg_c_14_sales_fact_1997` |
+| 3 | `agg-c-quarter-country` — (Unit Sales, Store Sales) × Quarter × Store Country | `agg_c_14` or `agg_c_special` | `agg_c_14_sales_fact_1997` |
+| 4 | `agg-g-ms-pcat-family-gender-marital` — Unit Sales × Family × Gender × Marital Status | `agg_g_ms_pcat_sales_fact_1997` | `agg_g_ms_pcat_sales_fact_1997` |
+
+### agg_l_05 is structurally unreachable by MDX
+
+The stock `demo/FoodMart.mondrian.xml` declares Time with `hasAll='false'`. Every MDX query therefore inherits a default-member filter `[Time].[1997]` which `RolapGalaxy.findAgg` translates to a `the_year = 1997` level predicate. `agg_l_05_sales_fact_1997` has `<NoLink dimension='Time'/>` — it carries no `the_year` column and cannot serve any query that references the Time level. It is therefore always rejected by the matcher in this schema. Task-U.1 covers 3 of the 4 declared agg tables; reaching agg_l_05 would require a schema change (introducing `hasAll='true'` on Time or a new "All Years" level) which is out of scope.
+
+### Query-shape tuning notes
+
+- Query #1 was originally `[Customer Count]` × Family × Gender — matcher rejected because distinct-count is non-additive and rolling up across `marital_status` (also carried by agg_g_ms_pcat) is non-additive-unsafe. Switching to additive Unit Sales lets rollup fire.
+- Query #3's first draft used `[Time].[Time].[Month].Members` and `[Store].[Stores].[Store State].Members`. Both tripped a pre-existing `SqlStatement.guessTypes` assertion (`types [null, null] cardinality != column count 1`) in the member-cache materialization path when `UseAggregates=true`. Using `[Time].[1997].Children` (quarters) and `[Store].[Store Country]` sidesteps the assertion without compromising the agg-selection contract — both c_* aggs carry Year/Quarter/Month + Store FK + both measures.
+
+### Property toggling
+
+Both `MondrianProperties.ReadAggregates` and `UseAggregates` default to `false`. `MvHitTest.@Before` flips them `true`; `@After` restores the previous value. No runtime or production-default change.
+
+### Sample captured SQL (query #1)
+
+**Legacy:**
+
+```
+select "agg_g_ms_pcat_sales_fact_1997"."the_year" as "c0",
+  "agg_g_ms_pcat_sales_fact_1997"."product_family" as "c1",
+  "agg_g_ms_pcat_sales_fact_1997"."gender" as "c2",
+  sum("agg_g_ms_pcat_sales_fact_1997"."unit_sales") as "m0"
+from "agg_g_ms_pcat_sales_fact_1997" as "agg_g_ms_pcat_sales_fact_1997"
+where "agg_g_ms_pcat_sales_fact_1997"."the_year" = 1997
+group by "agg_g_ms_pcat_sales_fact_1997"."the_year",
+  "agg_g_ms_pcat_sales_fact_1997"."product_family",
+  "agg_g_ms_pcat_sales_fact_1997"."gender"
+```
+
+**Calcite (re-unparsed by `RelToSqlConverter`):**
+
+```
+SELECT "the_year", "product_family", "gender", SUM("unit_sales") AS "m0"
+FROM "agg_g_ms_pcat_sales_fact_1997" ...
+```
+
+Cell-sets are byte-identical.
+
+### Results
+
+- `mvn test -Dtest=MvHitTest`: **4/4 green** (both backends exercised per-parameter).
+- `mvn test -Pcalcite-harness -Dmondrian.backend=legacy`: **42/42 green** (unchanged — MvHitTest is in the default profile, not the harness profile).
+- `mvn test -Pcalcite-harness -Dmondrian.backend=calcite`: **42/42 green** (unchanged).
+
+Task U stands as documented above for the MvRegistry-style design; Task U.1 closes the specific coverage gap it identified.
 
 ## Task V — Deferred (not a live compliance gap in this worktree)
 
