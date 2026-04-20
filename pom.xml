@@ -352,4 +352,29 @@ class MondrianServerVersion {
       </plugin>
     </plugins>
   </build>
+
+  <profiles>
+    <!--
+      Opt-in profile that overrides surefire's default excludes to run ONLY
+      the expensive Calcite equivalence tests. Usage:
+          mvn test -Pcalcite-harness
+    -->
+    <profile>
+      <id>calcite-harness</id>
+      <build>
+        <plugins>
+          <plugin>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <configuration>
+              <includes>
+                <include>**/mondrian/test/calcite/EquivalenceSmokeTest.java</include>
+                <include>**/mondrian/test/calcite/EquivalenceAggregateTest.java</include>
+              </includes>
+              <excludes combine.self="override"/>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>
