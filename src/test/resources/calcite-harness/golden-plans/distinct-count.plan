@@ -1,0 +1,82 @@
+LogicalSort(sort0=[$0], dir0=[ASC])
+  LogicalAggregate(group=[{0}])
+    LogicalProject(the_year=[$4])
+      JdbcTableScan(table=[[mondrian, time_by_day]])
+
+---
+LogicalSort(sort0=[$0], dir0=[ASC])
+  LogicalAggregate(group=[{0}])
+    LogicalProject(the_year=[$4])
+      JdbcTableScan(table=[[mondrian, time_by_day]])
+
+---
+LogicalSort(sort0=[$0], dir0=[ASC])
+  LogicalAggregate(group=[{0}])
+    LogicalProject(the_year=[$4])
+      JdbcTableScan(table=[[mondrian, time_by_day]])
+
+---
+LogicalSort(sort0=[$0], dir0=[ASC])
+  LogicalAggregate(group=[{0}])
+    LogicalProject(the_year=[$4])
+      JdbcTableScan(table=[[mondrian, time_by_day]])
+
+---
+LogicalSort(sort0=[$0], dir0=[ASC])
+  LogicalAggregate(group=[{0}])
+    LogicalProject(the_year=[$4])
+      JdbcTableScan(table=[[mondrian, time_by_day]])
+
+---
+LogicalSort(sort0=[$0], dir0=[ASC])
+  LogicalAggregate(group=[{0}])
+    LogicalProject(the_year=[$4])
+      JdbcTableScan(table=[[mondrian, time_by_day]])
+
+---
+LogicalSort(sort0=[$0], dir0=[ASC])
+  LogicalAggregate(group=[{0}])
+    LogicalProject(the_year=[$4])
+      JdbcTableScan(table=[[mondrian, time_by_day]])
+
+---
+LogicalSort(sort0=[$0], dir0=[ASC])
+  LogicalAggregate(group=[{0}])
+    LogicalProject(the_year=[$4])
+      JdbcTableScan(table=[[mondrian, time_by_day]])
+
+---
+LogicalSort(sort0=[$0], dir0=[ASC])
+  LogicalAggregate(group=[{0}])
+    LogicalProject(the_year=[$4])
+      JdbcTableScan(table=[[mondrian, time_by_day]])
+
+---
+LogicalSort(sort0=[$0], dir0=[ASC])
+  LogicalAggregate(group=[{0}])
+    LogicalProject(the_year=[$4])
+      JdbcTableScan(table=[[mondrian, time_by_day]])
+
+---
+LogicalSort(sort0=[$0], dir0=[ASC])
+  LogicalAggregate(group=[{0}])
+    LogicalProject(the_year=[$4])
+      JdbcTableScan(table=[[mondrian, time_by_day]])
+
+---
+LogicalSort(sort0=[$0], dir0=[ASC])
+  LogicalAggregate(group=[{0}])
+    LogicalProject(the_year=[$4])
+      JdbcTableScan(table=[[mondrian, time_by_day]])
+
+---
+LogicalSort(sort0=[$0], dir0=[ASC])
+  LogicalAggregate(group=[{0}])
+    LogicalProject(the_year=[$4])
+      JdbcTableScan(table=[[mondrian, time_by_day]])
+
+---
+LogicalSort(sort0=[$0], dir0=[ASC])
+  LogicalAggregate(group=[{0}])
+    LogicalProject(the_year=[$4])
+      JdbcTableScan(table=[[mondrian, time_by_day]])

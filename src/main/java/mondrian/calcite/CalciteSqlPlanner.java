@@ -9,6 +9,7 @@
 */
 package mondrian.calcite;
 
+import org.apache.calcite.plan.RelOptUtil;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.calcite.rel.rel2sql.RelToSqlConverter;
@@ -54,12 +55,94 @@ public final class CalciteSqlPlanner {
         this.dialect = dialect;
     }
 
+    // ------------------------------------------------------------------
+    // Plan-snapshot capture (harness hook).
+    //
+    // When a thread calls beginCapture() every subsequent plan() on that
+    // thread appends RelOptUtil.toString(rel) to a ThreadLocal list. The
+    // EquivalenceHarness drains the list after each run to feed the
+    // PLAN_DRIFT gate (see docs/plans/2026-04-19-calcite-plan-as-lingua-
+    // franca-design.md §Harness evolution). Zero overhead when not
+    // capturing: plan() only performs an int != null check.
+    // ------------------------------------------------------------------
+
+    private static final ThreadLocal<java.util.List<String>> CAPTURE =
+        new ThreadLocal<java.util.List<String>>();
+
+    /** Start accumulating plan snapshots on the current thread. */
+    public static void beginCapture() {
+        CAPTURE.set(new java.util.ArrayList<String>());
+    }
+
+    /**
+     * Stop capturing on the current thread and return the snapshots that
+     * were recorded, in call order. Returns an empty list if
+     * {@link #beginCapture()} was not called.
+     */
+    public static java.util.List<String> endCapture() {
+        java.util.List<String> out = CAPTURE.get();
+        CAPTURE.remove();
+        if (out == null) {
+            return java.util.Collections.emptyList();
+        }
+        return out;
+    }
+
     /** Render the request as a SQL string in the configured dialect. */
     public String plan(PlannerRequest req) {
         RelNode rel = planRel(req);
+        java.util.List<String> sink = CAPTURE.get();
+        if (sink != null) {
+            sink.add(normalisePlan(RelOptUtil.toString(rel)));
+        }
         SqlNode sqlNode =
             new RelToSqlConverter(dialect).visitRoot(rel).asStatement();
         return sqlNode.toSqlString(dialect).getSql();
+    }
+
+    /**
+     * Normalise a {@code RelOptUtil.toString} rendering so goldens are
+     * deterministic across JVM runs. Calcite's toString includes a per-rel
+     * numeric suffix on the outer rel name (e.g. {@code LogicalProject_5})
+     * derived from a cluster-scoped counter; stripped here so a new plan
+     * with the same shape produces identical text. Safe because structural
+     * changes (different rels, different field lists, different
+     * expressions) all alter the rendering elsewhere in the tree.
+     */
+    private static String normalisePlan(String raw) {
+        // Strip "_<digits>" that appears directly after a rel class name —
+        // only inside the first token on each line, i.e. between the first
+        // run of letters and the opening parenthesis.
+        StringBuilder out = new StringBuilder(raw.length());
+        int i = 0;
+        int n = raw.length();
+        while (i < n) {
+            char c = raw.charAt(i);
+            if (c == '_' && i + 1 < n
+                && Character.isDigit(raw.charAt(i + 1)))
+            {
+                // Look back: preceding char should be a letter (rel-name
+                // suffix). Otherwise keep as-is (don't munge literal
+                // identifiers like column names).
+                int back = out.length() - 1;
+                if (back >= 0 && Character.isLetter(out.charAt(back))) {
+                    int j = i + 1;
+                    while (j < n && Character.isDigit(raw.charAt(j))) {
+                        j++;
+                    }
+                    // Only strip when followed by '(' (the rel's opening
+                    // paren) — that's the positive signature of a rel
+                    // name, not e.g. an alias token.
+                    if (j < n && raw.charAt(j) == '(') {
+                        i = j;
+                        continue;
+                    }
+                }
+            }
+            out.append(c);
+            i++;
+        }
+        return out.toString();
     }
 
     /** Build the Calcite {@link RelNode} (used by plan-snapshot tests). */

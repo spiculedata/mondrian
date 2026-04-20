@@ -13,6 +13,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 
+import mondrian.calcite.CalciteSqlPlanner;
 import mondrian.rolap.sql.SqlInterceptor;
 import mondrian.test.calcite.corpus.SmokeCorpus.NamedMdx;
 
@@ -21,6 +22,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -72,6 +74,30 @@ public final class EquivalenceHarness {
      */
     public static final String SQL_COMPARE_SYS_PROP = "harness.sqlCompare";
 
+    /**
+     * System-property key controlling the hardness of the plan-snapshot
+     * comparison (PLAN_DRIFT gate). Mirrors {@link #SQL_COMPARE_SYS_PROP}
+     * but governs {@code golden-plans/<name>.plan} drift detection. Same
+     * {@link SqlCompareMode} tri-state applies: {@code strict} fails,
+     * {@code advisory} (default) records via {@link HarnessReporter},
+     * {@code off} skips the comparison entirely.
+     */
+    public static final String PLAN_COMPARE_SYS_PROP = "harness.planCompare";
+
+    /**
+     * System-property flag ({@code -Dharness.replan=true}) that rebaselines
+     * plan-snapshot goldens. When set, any query whose plan golden file is
+     * missing has one written from the captured plan text; queries with
+     * an existing golden are OVERWRITTEN with the current capture (i.e.
+     * full rebase). Off by default — the harness only reads goldens.
+     */
+    public static final String REPLAN_SYS_PROP = "harness.replan";
+
+    /** Separator used when concatenating per-execution plans into a
+     *  single {@code <query>.plan} file. Mirrors the unified-diff hunk
+     *  marker so reviewers recognise the multi-plan layout immediately. */
+    public static final String PLAN_SNAPSHOT_SEPARATOR = "\n---\n";
+
     /** See {@link EquivalenceHarness} class-level javadoc. */
     public enum SqlCompareMode {
         /** SQL mismatch tripped as a hard failure (legacy behaviour). */
@@ -88,7 +114,26 @@ public final class EquivalenceHarness {
      * rewrite transition, where the worst outcome is a drift going unlogged.
      */
     public static SqlCompareMode sqlCompareMode() {
-        String raw = System.getProperty(SQL_COMPARE_SYS_PROP);
+        return parseCompareMode(System.getProperty(SQL_COMPARE_SYS_PROP));
+    }
+
+    /**
+     * Reads {@link #PLAN_COMPARE_SYS_PROP}; defaults to
+     * {@link SqlCompareMode#ADVISORY}. Same parse rules as
+     * {@link #sqlCompareMode()}.
+     */
+    public static SqlCompareMode planCompareMode() {
+        return parseCompareMode(System.getProperty(PLAN_COMPARE_SYS_PROP));
+    }
+
+    /** Returns true when {@code -Dharness.replan=true} — triggers
+     *  rewrite of {@code golden-plans/<name>.plan} from the captured
+     *  plan text. */
+    public static boolean replanRequested() {
+        return Boolean.parseBoolean(System.getProperty(REPLAN_SYS_PROP));
+    }
+
+    private static SqlCompareMode parseCompareMode(String raw) {
         if (raw == null || raw.isEmpty()) {
             return SqlCompareMode.ADVISORY;
         }
@@ -128,8 +173,20 @@ public final class EquivalenceHarness {
         Objects.requireNonNull(interceptorClass, "interceptorClass");
 
         // --- Run A: classic Mondrian, no interceptor ---
-        FoodMartCapture.CapturedRun runA =
-            FoodMartCapture.executeCold(mdx, null);
+        // Plan-snapshot capture wraps the whole Run A. Under
+        // backend=calcite every SqlTupleReader / SegmentLoader /
+        // SqlStatisticsProvider call site pushes through
+        // CalciteSqlPlanner.plan(), which appends the captured
+        // RelOptUtil.toString to the thread-local sink. No-op when the
+        // backend is LEGACY (no planner.plan() calls happen).
+        CalciteSqlPlanner.beginCapture();
+        FoodMartCapture.CapturedRun runA;
+        List<String> capturedPlans;
+        try {
+            runA = FoodMartCapture.executeCold(mdx, null);
+        } finally {
+            capturedPlans = CalciteSqlPlanner.endCapture();
+        }
 
         // --- Gate 1: LEGACY_DRIFT ---
         Path goldenFile = goldenDir.resolve(mdx.name + ".json");
@@ -157,11 +214,42 @@ public final class EquivalenceHarness {
                     runA.cellSet, runA.executions, null, null));
         }
 
-        // TODO(worktree-#2): capture RelOptUtil.toString at plan time and
-        // pipe it through comparePlanSnapshot(mdx.name, planText,
-        // DEFAULT_GOLDEN_PLANS_DIR). When it returns non-empty, raise a
-        // PLAN_DRIFT HarnessResult here. Until plan capture is implemented
-        // the comparator stays exposed only as a public method for unit tests.
+        // --- Plan-snapshot gate (advisory by default) ---
+        // If Calcite produced any plans during Run A, either rebase the
+        // golden (-Dharness.replan=true) or compare against it. Absent
+        // golden + no replan = silently skip (first-run convenience).
+        if (!capturedPlans.isEmpty()) {
+            String planText = joinPlans(capturedPlans);
+            Path planFile = DEFAULT_GOLDEN_PLANS_DIR.resolve(
+                mdx.name + ".plan");
+            if (replanRequested()) {
+                writePlanGolden(planFile, planText);
+            } else {
+                Optional<String> planDrift = comparePlanSnapshot(
+                    mdx.name, planText, DEFAULT_GOLDEN_PLANS_DIR);
+                if (planDrift.isPresent()) {
+                    switch (planCompareMode()) {
+                    case STRICT:
+                        return new HarnessResult(
+                            FailureClass.PLAN_DRIFT,
+                            planDrift.get(),
+                            runA.cellSet, runA.executions, null, null);
+                    case ADVISORY:
+                        HarnessReporter.record(
+                            mdx.name,
+                            new HarnessResult(
+                                FailureClass.PLAN_DRIFT,
+                                planDrift.get(),
+                                runA.cellSet, runA.executions, null, null));
+                        break;
+                    case OFF:
+                    default:
+                        // drop
+                        break;
+                    }
+                }
+            }
+        }
 
         // --- Run B: interceptor installed via system property ---
         FoodMartCapture.CapturedRun runB =
@@ -255,6 +343,38 @@ public final class EquivalenceHarness {
             + " (file=" + planFile + ")"
             + "\n--- golden ---\n" + left
             + "\n--- captured ---\n" + right);
+    }
+
+    /** Joins captured plan snapshots into a single reviewable document
+     *  using {@link #PLAN_SNAPSHOT_SEPARATOR}. Single-plan queries produce
+     *  the plan verbatim (no leading/trailing separators). */
+    static String joinPlans(List<String> plans) {
+        if (plans.isEmpty()) {
+            return "";
+        }
+        if (plans.size() == 1) {
+            return plans.get(0);
+        }
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < plans.size(); i++) {
+            if (i > 0) {
+                b.append(PLAN_SNAPSHOT_SEPARATOR);
+            }
+            b.append(plans.get(i));
+        }
+        return b.toString();
+    }
+
+    /** Writes {@code planText} to {@code planFile}, creating parent dirs
+     *  as needed. Used only under {@code -Dharness.replan=true}. */
+    private static void writePlanGolden(Path planFile, String planText)
+        throws IOException
+    {
+        Path parent = planFile.toAbsolutePath().getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
+        Files.write(planFile, planText.getBytes(StandardCharsets.UTF_8));
     }
 
     private static String stripTrailingWhitespace(String s) {
