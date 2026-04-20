@@ -346,6 +346,7 @@ class MondrianServerVersion {
                  harness's own plumbing still run in the default build. -->
             <exclude>**/mondrian/test/calcite/EquivalenceSmokeTest.java</exclude>
             <exclude>**/mondrian/test/calcite/EquivalenceAggregateTest.java</exclude>
+            <exclude>**/mondrian/test/calcite/HarnessMutationTest.java</exclude>
           </excludes>
           <testFailureIgnore>true</testFailureIgnore>
         </configuration>
@@ -369,6 +370,7 @@ class MondrianServerVersion {
               <includes>
                 <include>**/mondrian/test/calcite/EquivalenceSmokeTest.java</include>
                 <include>**/mondrian/test/calcite/EquivalenceAggregateTest.java</include>
+                <include>**/mondrian/test/calcite/HarnessMutationTest.java</include>
               </includes>
               <excludes combine.self="override"/>
             </configuration>
