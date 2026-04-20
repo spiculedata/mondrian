@@ -1,0 +1,65 @@
+{
+  "mdx" : "SELECT\n  [Measures].[Unit Sales] on columns,\n  [Product].[Product Family].Members on rows\nFROM Sales\nWHERE {\n  [Time].[All Weeklys].[1997].[1].[15],\n  [Time].[All Weeklys].[1997].[2].[1]}",
+  "cellSet" : "Axis #0:\n{[Time].[Weekly].[1997].[1].[15]}\n{[Time].[Weekly].[1997].[2].[1]}\nAxis #1:\n{[Measures].[Unit Sales]}\nAxis #2:\n{[Product].[Products].[Drink]}\n{[Product].[Products].[Food]}\n{[Product].[Products].[Non-Consumable]}\nRow #0: 32\nRow #1: 273\nRow #2: 43\n",
+  "sqlExecutions" : [ {
+    "seq" : 0,
+    "sql" : "select \"time_by_day\".\"the_year\" as \"c0\" from \"time_by_day\" as \"time_by_day\" where \"time_by_day\".\"the_year\" = 1997 group by \"time_by_day\".\"the_year\" order by CASE WHEN \"time_by_day\".\"the_year\" IS NULL THEN 0 ELSE 1 END, \"time_by_day\".\"the_year\" ASC",
+    "rowCount" : 1,
+    "checksum" : "sha256:996977f88a67873681c186577910d9f213997f0d2f904537eae3db89e7f71834"
+  }, {
+    "seq" : 1,
+    "sql" : "select \"time_by_day\".\"week_of_year\" as \"c0\", \"time_by_day\".\"the_year\" as \"c1\" from \"time_by_day\" as \"time_by_day\" where (\"time_by_day\".\"the_year\" = 1997) and \"time_by_day\".\"week_of_year\" = 1 group by \"time_by_day\".\"week_of_year\", \"time_by_day\".\"the_year\" order by CASE WHEN \"time_by_day\".\"week_of_year\" IS NULL THEN 0 ELSE 1 END, \"time_by_day\".\"week_of_year\" ASC",
+    "rowCount" : 1,
+    "checksum" : "sha256:f5b56f78383b44cf9e097d92dbf82946e258393671600278603a45ea261742b0"
+  }, {
+    "seq" : 2,
+    "sql" : "select \"time_by_day\".\"time_id\" as \"c0\", \"time_by_day\".\"day_of_month\" as \"c1\" from \"time_by_day\" as \"time_by_day\" where (\"time_by_day\".\"the_year\" = 1997 and \"time_by_day\".\"week_of_year\" = 1) and \"time_by_day\".\"day_of_month\" = 15 group by \"time_by_day\".\"time_id\", \"time_by_day\".\"day_of_month\" order by CASE WHEN \"time_by_day\".\"time_id\" IS NULL THEN 0 ELSE 1 END, \"time_by_day\".\"time_id\" ASC",
+    "rowCount" : 1,
+    "checksum" : "sha256:364033c4f636d9a1efec09351e3790152469f41f909db385db75f0fc5480c968"
+  }, {
+    "seq" : 3,
+    "sql" : "select \"time_by_day\".\"week_of_year\" as \"c0\", \"time_by_day\".\"the_year\" as \"c1\" from \"time_by_day\" as \"time_by_day\" where (\"time_by_day\".\"the_year\" = 1997) and \"time_by_day\".\"week_of_year\" = 2 group by \"time_by_day\".\"week_of_year\", \"time_by_day\".\"the_year\" order by CASE WHEN \"time_by_day\".\"week_of_year\" IS NULL THEN 0 ELSE 1 END, \"time_by_day\".\"week_of_year\" ASC",
+    "rowCount" : 1,
+    "checksum" : "sha256:09dbe1e8775825d745c9b8819c3d09599a19d54c00d34ce1d8c203f65ee419ec"
+  }, {
+    "seq" : 4,
+    "sql" : "select \"time_by_day\".\"time_id\" as \"c0\", \"time_by_day\".\"day_of_month\" as \"c1\" from \"time_by_day\" as \"time_by_day\" where (\"time_by_day\".\"the_year\" = 1997 and \"time_by_day\".\"week_of_year\" = 2) and \"time_by_day\".\"day_of_month\" = 1 group by \"time_by_day\".\"time_id\", \"time_by_day\".\"day_of_month\" order by CASE WHEN \"time_by_day\".\"time_id\" IS NULL THEN 0 ELSE 1 END, \"time_by_day\".\"time_id\" ASC",
+    "rowCount" : 1,
+    "checksum" : "sha256:01fd0ac24f4b0f1470e7d4f128f0dcfd44390d8ba83f013c767f006c0f76599a"
+  }, {
+    "seq" : 5,
+    "sql" : "select \"product_class\".\"product_family\" as \"c0\" from \"product\" as \"product\", \"product_class\" as \"product_class\" where \"product\".\"product_class_id\" = \"product_class\".\"product_class_id\" group by \"product_class\".\"product_family\" order by CASE WHEN \"product_class\".\"product_family\" IS NULL THEN 1 ELSE 0 END, \"product_class\".\"product_family\" ASC",
+    "rowCount" : 3,
+    "checksum" : "sha256:e3614f4f86801462eb83492a965f84de8ab6ef92f984c31756da41e8d0eba94f"
+  }, {
+    "seq" : 6,
+    "sql" : "select \"time_by_day\".\"time_id\" as \"c0\", \"time_by_day\".\"day_of_month\" as \"c1\" from \"time_by_day\" as \"time_by_day\" where (\"time_by_day\".\"the_year\" = 1997 and \"time_by_day\".\"week_of_year\" = 1) group by \"time_by_day\".\"time_id\", \"time_by_day\".\"day_of_month\" order by CASE WHEN \"time_by_day\".\"time_id\" IS NULL THEN 0 ELSE 1 END, \"time_by_day\".\"time_id\" ASC",
+    "rowCount" : 6,
+    "checksum" : "sha256:7966b0f066c2d2fe30583ac269254269f8170c73e18fee6598bd34bb1e1b8ba9"
+  }, {
+    "seq" : 7,
+    "sql" : "select \"time_by_day\".\"time_id\" as \"c0\", \"time_by_day\".\"day_of_month\" as \"c1\" from \"time_by_day\" as \"time_by_day\" where (\"time_by_day\".\"the_year\" = 1997 and \"time_by_day\".\"week_of_year\" = 2) group by \"time_by_day\".\"time_id\", \"time_by_day\".\"day_of_month\" order by CASE WHEN \"time_by_day\".\"time_id\" IS NULL THEN 0 ELSE 1 END, \"time_by_day\".\"time_id\" ASC",
+    "rowCount" : 11,
+    "checksum" : "sha256:cf65ebd13fa6773a14d5603631cfb304a2344ec1ca23faa785d5f3b3978c9527"
+  }, {
+    "seq" : 8,
+    "sql" : "select count(distinct \"time_id\") from \"time_by_day\"",
+    "rowCount" : 1,
+    "checksum" : "sha256:aa81e049f8c7129732e98d0dbe229940456d4bb20968135db61d3596f9ca0760"
+  }, {
+    "seq" : 9,
+    "sql" : "select count(distinct \"product_family\") from \"product_class\"",
+    "rowCount" : 1,
+    "checksum" : "sha256:8ddce159f92f86d0d74b632d2394cb611ec46e296a7bbeef160140253ff2d286"
+  }, {
+    "seq" : 10,
+    "sql" : "select count(distinct \"the_year\") from \"time_by_day\"",
+    "rowCount" : 1,
+    "checksum" : "sha256:d95838638b57fb04835fc9103a8a6f4d724435aad81507e74d5cdb2ff57f7d77"
+  }, {
+    "seq" : 11,
+    "sql" : "select \"time_by_day\".\"the_year\" as \"c0\", \"time_by_day\".\"time_id\" as \"c1\", \"product_class\".\"product_family\" as \"c2\", sum(\"sales_fact_1997\".\"unit_sales\") as \"m0\" from \"sales_fact_1997\" as \"sales_fact_1997\", \"time_by_day\" as \"time_by_day\", \"product\" as \"product\", \"product_class\" as \"product_class\" where \"time_by_day\".\"the_year\" = 1997 and \"time_by_day\".\"time_id\" in (367, 715) and \"sales_fact_1997\".\"time_id\" = \"time_by_day\".\"time_id\" and \"sales_fact_1997\".\"product_id\" = \"product\".\"product_id\" and \"product\".\"product_class_id\" = \"product_class\".\"product_class_id\" group by \"time_by_day\".\"the_year\", \"time_by_day\".\"time_id\", \"product_class\".\"product_family\"",
+    "rowCount" : 3,
+    "checksum" : "sha256:30d2273cb01367ae82db73c6632e446e55b7a0ccc95855ae40258a04ea8575c8"
+  } ]
+}
