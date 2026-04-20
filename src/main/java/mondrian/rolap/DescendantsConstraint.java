@@ -22,9 +22,21 @@ import java.util.*;
  * @author av
  * @since Nov 10, 2005
  */
-class DescendantsConstraint implements TupleConstraint {
+public class DescendantsConstraint implements TupleConstraint {
     List<RolapMember> parentMembers;
     MemberChildrenConstraint mcc;
+
+    /** Exposed for the Calcite backend's tuple-read translator
+     *  (Task Q, worktree #2). Scheduled for deletion in worktree #4. */
+    public List<RolapMember> getParentMembers() {
+        return parentMembers;
+    }
+
+    /** Exposed for the Calcite backend's tuple-read translator
+     *  (Task Q, worktree #2). Scheduled for deletion in worktree #4. */
+    public MemberChildrenConstraint getMcc() {
+        return mcc;
+    }
 
     /**
      * Creates a DescendantsConstraint.

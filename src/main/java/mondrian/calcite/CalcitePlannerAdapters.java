@@ -11,6 +11,7 @@ package mondrian.calcite;
 
 import mondrian.olap.Member;
 import mondrian.rolap.DefaultTupleConstraint;
+import mondrian.rolap.DescendantsConstraint;
 import mondrian.rolap.RolapAggregator;
 import mondrian.rolap.RolapAttribute;
 import mondrian.rolap.RolapCubeDimension;
@@ -171,6 +172,10 @@ public final class CalcitePlannerAdapters {
                     levels, (RolapNativeSet.SetConstraint) constraint);
             }
         }
+        if (constraint instanceof DescendantsConstraint) {
+            return translateDescendantsConstraintTupleRead(
+                levels, (DescendantsConstraint) constraint);
+        }
         if (!(constraint instanceof DefaultTupleConstraint)) {
             throw new UnsupportedTranslation(
                 "fromTupleRead: non-default TupleConstraint not yet "
@@ -240,6 +245,205 @@ public final class CalcitePlannerAdapters {
             emitTargetProjections(b, seen, t);
         }
 
+        b.distinct(true);
+        return b.build();
+    }
+
+    /**
+     * Task Q (worktree #2): translate a {@link DescendantsConstraint} into a
+     * <em>dim-rooted</em> {@link PlannerRequest}. This is the shape Mondrian
+     * emits for the multi-parent hop of {@code Descendants(<member>, <level>)}
+     * — {@code SqlMemberSource.getMemberChildren} walks each parent's children
+     * in one shot by enumerating all members at the target level whose
+     * ancestor chain matches one of the parents.
+     *
+     * <p>Translation plan:
+     * <ul>
+     *   <li>Single target level (the descendant-level passed to MDX
+     *       {@code Descendants}).</li>
+     *   <li>Projections: every ancestor level's attribute keyList, root to
+     *       target, deduped by {@code (alias, colName)}. Mirrors legacy
+     *       {@code addLevelMemberSql}'s root-down walk so the
+     *       {@code SqlTupleReader.Target} column layout can locate each
+     *       ancestor's key columns for member building.</li>
+     *   <li>Filter: OR-of-AND across parent rows. Columns = the parent
+     *       level's attribute keyList (aliased on the target's dim table);
+     *       each row carries the corresponding parent's {@code getKeyAsList()}
+     *       values. A single-parent single-column parent collapses to an
+     *       EQ filter at render time.</li>
+     *   <li>DISTINCT + per-target ORDER BY from the existing
+     *       level-members machinery.</li>
+     * </ul>
+     *
+     * <p>Unsupported shapes (throw {@link UnsupportedTranslation}):
+     * <ul>
+     *   <li>Empty parent list (legacy emits {@code FALSE}; not exercised
+     *       by the corpus).</li>
+     *   <li>Parents at different levels (legacy allows it through
+     *       {@code constrainMultiLevelMembers}; this translator requires a
+     *       uniform level so the TupleFilter shape is well-defined).</li>
+     *   <li>Calculated / all parents (their SQL key shape is not
+     *       expressible as a column predicate).</li>
+     *   <li>Multi-target crossjoin (level.size() != 1).</li>
+     * </ul>
+     */
+    private static PlannerRequest translateDescendantsConstraintTupleRead(
+        List<RolapCubeLevel> levels,
+        DescendantsConstraint constraint)
+    {
+        if (levels.size() != 1) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: DescendantsConstraint with multi-target "
+                + "crossjoin not yet supported (levels.size="
+                + levels.size() + ")");
+        }
+        List<RolapMember> parents = constraint.getParentMembers();
+        if (parents == null || parents.isEmpty()) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: DescendantsConstraint with empty "
+                + "parentMembers list");
+        }
+        RolapCubeLevel parentLevel = null;
+        for (RolapMember p : parents) {
+            if (p == null || p.isCalculated() || p.isAll()) {
+                throw new UnsupportedTranslation(
+                    "fromTupleRead: DescendantsConstraint parent member "
+                    + p + " is null/calculated/all");
+            }
+            if (!(p.getLevel() instanceof RolapCubeLevel)) {
+                throw new UnsupportedTranslation(
+                    "fromTupleRead: DescendantsConstraint parent " + p
+                    + " level is not a RolapCubeLevel");
+            }
+            RolapCubeLevel pl = (RolapCubeLevel) p.getLevel();
+            if (parentLevel == null) {
+                parentLevel = pl;
+            } else if (parentLevel != pl) {
+                throw new UnsupportedTranslation(
+                    "fromTupleRead: DescendantsConstraint parents span "
+                    + "multiple levels (" + parentLevel.getUniqueName()
+                    + " vs " + pl.getUniqueName() + ")");
+            }
+        }
+
+        RolapCubeLevel target = levels.get(0);
+        TargetShape shape = shapeFor(target);
+
+        // Parents must live in the same hierarchy and on an ancestor level
+        // of the target, otherwise the ancestor-key projection doesn't
+        // uniquely identify the descendant chain.
+        if (parentLevel.getHierarchy() != target.getHierarchy()) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: DescendantsConstraint parent hierarchy "
+                + parentLevel.getHierarchy().getUniqueName()
+                + " does not match target hierarchy "
+                + target.getHierarchy().getUniqueName());
+        }
+        if (parentLevel.getDepth() >= target.getDepth()) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: DescendantsConstraint parent level "
+                + parentLevel.getUniqueName()
+                + " is not an ancestor of target "
+                + target.getUniqueName());
+        }
+
+        // Parent-level filter columns must live on the target's leaf dim
+        // table (shape.tableAlias). This holds for flat dims like Time
+        // where Year/Quarter/Month share `time_by_day`; snowflakes break
+        // this assumption and would need per-ancestor joins (deferred).
+        RolapAttribute parentAttr = parentLevel.getAttribute();
+        List<RolapSchema.PhysColumn> parentKeyCols = parentAttr.getKeyList();
+        if (parentKeyCols == null || parentKeyCols.isEmpty()) {
+            throw new UnsupportedTranslation(
+                "fromTupleRead: DescendantsConstraint parent level "
+                + parentLevel.getUniqueName() + " has no key columns");
+        }
+        List<PlannerRequest.Column> filterCols =
+            new java.util.ArrayList<>(parentKeyCols.size());
+        for (RolapSchema.PhysColumn pc : parentKeyCols) {
+            if (!(pc instanceof RolapSchema.PhysRealColumn)) {
+                throw new UnsupportedTranslation(
+                    "fromTupleRead: DescendantsConstraint parent key "
+                    + "column " + pc.getClass().getName() + " is not "
+                    + "a PhysRealColumn");
+            }
+            if (pc.relation == null
+                || !shape.tableAlias.equals(pc.relation.getAlias()))
+            {
+                throw new UnsupportedTranslation(
+                    "fromTupleRead: DescendantsConstraint parent key "
+                    + "column " + ((RolapSchema.PhysRealColumn) pc).name
+                    + " lives on "
+                    + (pc.relation == null ? "null" : pc.relation.getAlias())
+                    + " but target dim table is " + shape.tableAlias
+                    + " (snowflake parent filter not yet supported)");
+            }
+            filterCols.add(
+                new PlannerRequest.Column(
+                    shape.tableAlias,
+                    ((RolapSchema.PhysRealColumn) pc).name));
+        }
+
+        // Build OR-of-AND rows from parent.getKeyAsList(). The list's size
+        // must match parentKeyCols.size() for every parent.
+        List<List<Object>> rows = new java.util.ArrayList<>(parents.size());
+        for (RolapMember p : parents) {
+            List<Comparable> keys = p.getKeyAsList();
+            if (keys.size() != filterCols.size()) {
+                throw new UnsupportedTranslation(
+                    "fromTupleRead: DescendantsConstraint parent " + p
+                    + " key arity " + keys.size()
+                    + " != parent level key arity " + filterCols.size());
+            }
+            List<Object> row = new java.util.ArrayList<>(keys.size());
+            for (Comparable k : keys) {
+                row.add(k);
+            }
+            rows.add(row);
+        }
+
+        PlannerRequest.Builder b =
+            PlannerRequest.builder(shape.tableName);
+        // Task L snowflake chain (flat dims: empty).
+        Set<String> crossJoined = new LinkedHashSet<>();
+        crossJoined.add(shape.tableAlias);
+        for (PlannerRequest.Join edge : shape.dimChain) {
+            b.addJoin(edge);
+            crossJoined.add(edge.dimTable);
+        }
+
+        // Projections: walk from root down to target, emitting each level's
+        // attribute keyList (deduped). Mirrors legacy addLevelMemberSql so
+        // that ColumnLayout lookups match on the tuple reader side.
+        Set<String> seen = new LinkedHashSet<>();
+        Set<String> orderedKeys = new LinkedHashSet<>();
+        List<? extends RolapCubeLevel> allLevels =
+            target.getHierarchy().getLevelList();
+        for (int i = 0; i <= target.getDepth(); i++) {
+            RolapCubeLevel cur = allLevels.get(i);
+            if (cur.isAll()) {
+                continue;
+            }
+            RolapAttribute attr = cur.getAttribute();
+            List<RolapSchema.PhysColumn> keyList = attr.getKeyList();
+            for (RolapSchema.PhysColumn kc : keyList) {
+                PlannerRequest.Column kp =
+                    asProjection(kc, shape.tableAlias, "key");
+                if (seen.add(shape.tableAlias + "." + kp.name)) {
+                    b.addProjection(kp);
+                }
+                if (orderedKeys.add(kp.name)) {
+                    b.addOrderBy(
+                        new PlannerRequest.OrderBy(
+                            kp, PlannerRequest.Order.ASC));
+                }
+            }
+        }
+
+        // Filter: TupleFilter lets the renderer choose IN (single col),
+        // EQ (single row + single col), or OR-of-AND (multi-col).
+        b.addTupleFilter(
+            new PlannerRequest.TupleFilter(filterCols, rows));
         b.distinct(true);
         return b.build();
     }

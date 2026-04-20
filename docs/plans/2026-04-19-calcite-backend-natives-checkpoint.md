@@ -348,3 +348,95 @@ Net +2 pass: `filter`, `native-filter-product-names`.
 
 FilterConstraint is cleared. The two remaining blockers are both
 non-SetConstraint shapes.
+
+## Task Q — `DescendantsConstraint` fromTupleRead
+
+Target: multi-parent Descendants hop (`Descendants(<member>, <leaf-level>)`
+two levels deep) now translates via the tuple-read path instead of
+throwing `non-default TupleConstraint not yet supported`.
+
+### What landed
+
+- `DescendantsConstraint` promoted from package-private to `public` and
+  two getters added (`getParentMembers`, `getMcc`) so the
+  `mondrian.calcite` translator can read the constraint's state without
+  reflection. Scheduled for deletion in worktree #4.
+- New branch `translateDescendantsConstraintTupleRead` in
+  `CalcitePlannerAdapters`:
+  - Single-target only; parents must share a level that is an
+    ancestor of the target on the same hierarchy.
+  - Projections walk every non-all level from root to target,
+    emitting each level's attribute keyList (dedup by alias+name).
+    Mirrors legacy `addLevelMemberSql`'s root-down walk so
+    `SqlTupleReader.Target`'s column layout still lines up with the
+    result columns.
+  - Parent predicate is a `TupleFilter` over the parent-level's
+    attribute keyList, one row per parent with
+    `member.getKeyAsList()` values. Single-parent / single-key
+    degenerates to EQ at render time.
+  - Snowflake-parent-filter (parent key on a non-leaf dim table) is
+    rejected with `UnsupportedTranslation`; the corpus doesn't
+    exercise it.
+- New unit test `TupleReadDescendantsTest` covers the empty-parent and
+  multi-target rejection paths; positive path rides the calcite-harness
+  run of the `descendants` corpus entry.
+
+### Legacy vs Calcite SQL (Descendants hop, parents = Q1..Q4)
+
+Legacy (`golden-legacy/descendants.json` seq=1):
+
+```
+select "time_by_day"."the_year" as "c0",
+       "time_by_day"."quarter" as "c1",
+       "time_by_day"."month_of_year" as "c2"
+from "time_by_day" as "time_by_day"
+where ("time_by_day"."the_year" = 1997 and "time_by_day"."quarter" = 'Q1'
+    or "time_by_day"."the_year" = 1997 and "time_by_day"."quarter" = 'Q2'
+    or "time_by_day"."the_year" = 1997 and "time_by_day"."quarter" = 'Q3'
+    or "time_by_day"."the_year" = 1997 and "time_by_day"."quarter" = 'Q4')
+group by "time_by_day"."the_year",
+         "time_by_day"."quarter",
+         "time_by_day"."month_of_year"
+order by ... the_year ASC, ... quarter ASC, ... month_of_year ASC
+```
+
+Calcite (traced from `EquivalenceSmokeTest#equivalent[descendants]`):
+
+```
+SELECT "the_year", "quarter", "month_of_year"
+FROM "time_by_day"
+WHERE "the_year" = 1997 AND "quarter" = 'Q1'
+   OR "the_year" = 1997 AND "quarter" = 'Q2'
+   OR "the_year" = 1997 AND "quarter" = 'Q3'
+   OR "the_year" = 1997 AND "quarter" = 'Q4'
+GROUP BY "the_year", "quarter", "month_of_year"
+ORDER BY "the_year", "quarter", "month_of_year"
+```
+
+Semantically identical; rowset shape + checksum match.
+
+### Files changed
+
+| File | Delta |
+|------|-------|
+| `src/main/java/mondrian/rolap/DescendantsConstraint.java`    | +14 / -1 |
+| `src/main/java/mondrian/calcite/CalcitePlannerAdapters.java` | +170 / -0 |
+| `src/test/java/mondrian/calcite/TupleReadDescendantsTest.java` | new    |
+
+### Harness state
+
+| Run                                                                              | Result         |
+|----------------------------------------------------------------------------------|----------------|
+| `mvn -Pcalcite-harness -Dmondrian.backend=legacy -Dtest='Equivalence*Test' test` | **34/34 pass** |
+| `mvn -Pcalcite-harness                          -Dtest='Equivalence*Test' test` | **33/34 pass** (was 32/34) |
+
+Net +1 pass: `descendants`.
+
+### Post-Task-Q first-throw bucket distribution
+
+| Count | First `UnsupportedTranslation` / signal |
+|-------|-----------------------------------------|
+| 1     | `types cardinality != column count` (non-empty-rows — level properties) |
+
+DescendantsConstraint is cleared. Only `non-empty-rows` remains — the
+NECJ level-properties gap tracked as Task R.
