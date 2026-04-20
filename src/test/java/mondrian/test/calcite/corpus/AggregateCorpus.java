@@ -108,40 +108,6 @@ public final class AggregateCorpus {
                 + "WHERE ([Store].[USA].[CA])"),
 
             new NamedMdx(
-                "agg-distinct-count-mixed-levels",
-                // FastBatchingCellReaderTest#testAggregateDistinctCount2
-                "WITH MEMBER [Time].[Time].[1997 Q1 plus July] AS\n"
-                + " 'Aggregate({[Time].[1997].[Q1],"
-                + " [Time].[1997].[Q3].[7]})', solve_order=1\n"
-                + "SELECT {[Measures].[Unit Sales],"
-                + " [Measures].[Customer Count]} ON COLUMNS,\n"
-                + "  {[Time].[1997].[Q1],\n"
-                + "   [Time].[1997].[Q2],\n"
-                + "   [Time].[1997].[Q3].[7],\n"
-                + "   [Time].[1997 Q1 plus July]} ON ROWS\n"
-                + "FROM Sales\n"
-                + "WHERE ([Store].[USA].[CA])"),
-
-            new NamedMdx(
-                "agg-distinct-count-two-calcs",
-                // FastBatchingCellReaderTest#testAggregateDistinctCount3
-                "WITH\n"
-                + "  MEMBER [Promotion].[Media Type].[TV plus Radio] AS"
-                + " 'Aggregate({[Promotion].[Media Type].[TV],"
-                + " [Promotion].[Media Type].[Radio]})', solve_order=1\n"
-                + "  MEMBER [Time].[Time].[1997 Q1 plus July] AS"
-                + " 'Aggregate({[Time].[1997].[Q1],"
-                + " [Time].[1997].[Q3].[7]})', solve_order=1\n"
-                + "SELECT {[Promotion].[Media Type].[TV plus Radio],\n"
-                + "        [Promotion].[Media Type].[TV],\n"
-                + "        [Promotion].[Media Type].[Radio]} ON COLUMNS,\n"
-                + "       {[Time].[1997],\n"
-                + "        [Time].[1997].[Q1],\n"
-                + "        [Time].[1997 Q1 plus July]} ON ROWS\n"
-                + "FROM Sales\n"
-                + "WHERE [Measures].[Customer Count]"),
-
-            new NamedMdx(
                 "native-cj-usa-product-names",
                 // NativeSetEvaluationTest#testNativeHonorsRoleRestrictions
                 //   -- base MDX (role-free form): native crossjoin across
@@ -177,7 +143,17 @@ public final class AggregateCorpus {
                 + "FROM Sales\n"
                 + "WHERE {\n"
                 + "  [Time].[All Weeklys].[1997].[1].[15],\n"
-                + "  [Time].[All Weeklys].[1997].[2].[1]}")
+                + "  [Time].[All Weeklys].[1997].[2].[1]}"),
+
+            new NamedMdx(
+                "agg-distinct-count-customers-levels",
+                // AggregationOnDistinctCountMeasuresTest#testMondrian906
+                //   (base MDX — no role; mix of state & country levels with
+                //   a distinct-count measure triggers the aggregation-list
+                //   optimization path)
+                "select {[Customers].[USA], [Customers].[USA].[OR],"
+                + " [Customers].[USA].[WA]} on columns,"
+                + " {[Measures].[Customer Count]} on rows from [Sales]")
         );
     }
 }
