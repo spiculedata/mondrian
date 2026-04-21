@@ -241,6 +241,29 @@ public final class CalciteSqlPlanner {
     /** Render the request as a SQL string in the configured dialect. */
     public String plan(PlannerRequest req) {
         long tPlanStart = PROFILE ? System.nanoTime() : 0L;
+        // Hand-rolled MV matcher (Option D —
+        // docs/reports/perf-investigation-volcano-mv-win.md).
+        // Runs before planRel so the downstream Hep/Volcano stages
+        // see the simpler (already-rewritten) request. Bypasses
+        // Calcite's SubstitutionVisitor entirely.
+        MvRegistry reg = mvRegistry;
+        if (reg != null && reg.size() > 0) {
+            try {
+                PlannerRequest rewritten = MvMatcher.tryRewrite(req, reg);
+                if (rewritten != req) {
+                    req = rewritten;
+                }
+            } catch (RuntimeException re) {
+                // Belt-and-braces: any matcher surprise falls back
+                // to the original request. Never fail plan() due to
+                // an MV-path issue.
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug(
+                        "MvMatcher.tryRewrite threw; "
+                        + "falling back to unrewritten request", re);
+                }
+            }
+        }
         RelNode rel = planRel(req);
         long tOptStart = PROFILE ? System.nanoTime() : 0L;
         RelNode optimized = optimize(rel);

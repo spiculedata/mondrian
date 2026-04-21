@@ -247,6 +247,18 @@ public class MvRegistry {
     }
 
     /**
+     * Exposes the underlying {@link ShapeSpec} list that drives both
+     * the Calcite-MV-rule registration path and the hand-rolled
+     * {@link MvMatcher} PlannerRequest-level rewrite (Option D,
+     * {@code docs/reports/perf-investigation-volcano-mv-win.md}).
+     * Read-only; empty for registries built from pre-packaged
+     * materialization lists (test fixtures).
+     */
+    public List<ShapeSpec> shapeSpecs() {
+        return shapeSpecs;
+    }
+
+    /**
      * Returns the list of {@link ShapeSpec}s for this aggregate
      * MeasureGroup. The current implementation hardcodes the four
      * shapes that match the MvHit corpus — future work will
