@@ -30,6 +30,13 @@ import javax.sql.DataSource;
  */
 public final class CalciteMondrianSchema {
 
+    /** Opt-in profiling switch. Guarded by {@code -Dharness.calcite.profile=true}.
+     *  When enabled, each constructor call records elapsed nanos under the
+     *  {@code "CalciteMondrianSchema.ctor"} bucket in
+     *  {@link CalciteProfile}. Off by default — zero overhead. */
+    private static final boolean PROFILE =
+        Boolean.getBoolean("harness.calcite.profile");
+
     private final SchemaPlus root;
     private final SchemaPlus schema;
     private final String schemaName;
@@ -42,10 +49,15 @@ public final class CalciteMondrianSchema {
             schemaName = "mondrian";
         }
         this.schemaName = schemaName;
+        long t0 = PROFILE ? System.nanoTime() : 0L;
         this.root = Frameworks.createRootSchema(true);
         this.schema = root.add(
             schemaName,
             JdbcSchema.create(root, schemaName, dataSource, null, null));
+        if (PROFILE) {
+            CalciteProfile.record(
+                "CalciteMondrianSchema.ctor", System.nanoTime() - t0);
+        }
     }
 
     /** Root schema (use as entry point for RelBuilder / FrameworkConfig). */

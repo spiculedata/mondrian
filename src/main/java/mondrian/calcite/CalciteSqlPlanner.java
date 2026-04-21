@@ -39,6 +39,13 @@ import java.util.Map;
  */
 public final class CalciteSqlPlanner {
 
+    /** Opt-in profiling switch ({@code -Dharness.calcite.profile=true}).
+     *  When enabled each phase of {@link #plan} / {@link #planRel} records
+     *  elapsed nanos under {@link CalciteProfile}. Off by default — the
+     *  only overhead is a single final-boolean read per entry point. */
+    private static final boolean PROFILE =
+        Boolean.getBoolean("harness.calcite.profile");
+
     private final CalciteMondrianSchema schema;
     private final SqlDialect dialect;
 
@@ -90,14 +97,24 @@ public final class CalciteSqlPlanner {
 
     /** Render the request as a SQL string in the configured dialect. */
     public String plan(PlannerRequest req) {
+        long tPlanStart = PROFILE ? System.nanoTime() : 0L;
         RelNode rel = planRel(req);
         java.util.List<String> sink = CAPTURE.get();
         if (sink != null) {
             sink.add(normalisePlan(RelOptUtil.toString(rel)));
         }
+        long tUnparseStart = PROFILE ? System.nanoTime() : 0L;
         SqlNode sqlNode =
             new RelToSqlConverter(dialect).visitRoot(rel).asStatement();
-        return sqlNode.toSqlString(dialect).getSql();
+        String out = sqlNode.toSqlString(dialect).getSql();
+        if (PROFILE) {
+            long now = System.nanoTime();
+            CalciteProfile.record(
+                "CalciteSqlPlanner.unparse", now - tUnparseStart);
+            CalciteProfile.record(
+                "CalciteSqlPlanner.plan.total", now - tPlanStart);
+        }
+        return out;
     }
 
     /**
@@ -150,11 +167,21 @@ public final class CalciteSqlPlanner {
         if (req == null) {
             throw new IllegalArgumentException("request is null");
         }
+        long tCfg = PROFILE ? System.nanoTime() : 0L;
         FrameworkConfig cfg = Frameworks.newConfigBuilder()
             .defaultSchema(schema.schema())
             .build();
         RelBuilder b = RelBuilder.create(cfg);
-        return build(b, req);
+        long tBuild = PROFILE ? System.nanoTime() : 0L;
+        RelNode out = build(b, req);
+        if (PROFILE) {
+            long now = System.nanoTime();
+            CalciteProfile.record(
+                "CalciteSqlPlanner.relBuilderCreate", tBuild - tCfg);
+            CalciteProfile.record(
+                "CalciteSqlPlanner.build", now - tBuild);
+        }
+        return out;
     }
 
     private RelNode build(RelBuilder b, PlannerRequest req) {

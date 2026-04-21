@@ -81,15 +81,23 @@ public class SegmentLoader {
         this.cacheMgr = cacheMgr;
     }
 
+    private static final boolean CALCITE_PROFILE =
+        Boolean.getBoolean("harness.calcite.profile");
+
     private static CalciteSqlPlanner plannerFor(RolapStar star) {
         CalciteSqlPlanner cached = CALCITE_PLANNER_CACHE.get(star);
         if (cached != null) {
+            if (CALCITE_PROFILE) {
+                mondrian.calcite.CalciteProfile.record(
+                    "SegmentLoader.plannerFor.hit", 0L);
+            }
             return cached;
         }
         // Under backend=calcite we deliberately avoid consulting
         // mondrian.spi.Dialect for product-name lookup; those classes are
         // slated for removal in worktree #4. Read the product name straight
         // off DatabaseMetaData via CalciteDialectMap.forDataSource.
+        long t0 = CALCITE_PROFILE ? System.nanoTime() : 0L;
         CalciteMondrianSchema schema =
             new CalciteMondrianSchema(star.getDataSource(), "mondrian");
         CalciteSqlPlanner planner =
@@ -98,6 +106,10 @@ public class SegmentLoader {
                 CalciteDialectMap.forDataSource(star.getDataSource()));
         CalciteSqlPlanner existing =
             CALCITE_PLANNER_CACHE.putIfAbsent(star, planner);
+        if (CALCITE_PROFILE) {
+            mondrian.calcite.CalciteProfile.record(
+                "SegmentLoader.plannerFor.miss", System.nanoTime() - t0);
+        }
         return existing != null ? existing : planner;
     }
 
