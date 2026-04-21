@@ -357,6 +357,8 @@ class MondrianServerVersion {
             <exclude>**/mondrian/test/calcite/EquivalenceCalcTest.java</exclude>
             <exclude>**/mondrian/test/calcite/HarnessMutationTest.java</exclude>
             <exclude>**/mondrian/test/calcite/SqlDiffReportTest.java</exclude>
+            <exclude>**/mondrian/test/calcite/SqlDiffMatrixReportTest.java</exclude>
+            <exclude>**/mondrian/test/calcite/PerfBenchmarkTest.java</exclude>
           </excludes>
           <testFailureIgnore>true</testFailureIgnore>
         </configuration>
@@ -383,6 +385,8 @@ class MondrianServerVersion {
                 <include>**/mondrian/test/calcite/EquivalenceCalcTest.java</include>
                 <include>**/mondrian/test/calcite/HarnessMutationTest.java</include>
                 <include>**/mondrian/test/calcite/SqlDiffReportTest.java</include>
+                <include>**/mondrian/test/calcite/SqlDiffMatrixReportTest.java</include>
+                <include>**/mondrian/test/calcite/PerfBenchmarkTest.java</include>
               </includes>
               <excludes combine.self="override"/>
             </configuration>
