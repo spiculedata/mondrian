@@ -9,9 +9,8 @@
 */
 package mondrian.spi.impl;
 
-import mondrian.calcite.CalciteDialectMap;
-import mondrian.calcite.CalciteMondrianSchema;
 import mondrian.calcite.CalcitePlannerAdapters;
+import mondrian.calcite.CalcitePlannerCache;
 import mondrian.calcite.CalciteSqlPlanner;
 import mondrian.calcite.MondrianBackend;
 import mondrian.calcite.PlannerRequest;
@@ -27,8 +26,6 @@ import org.apache.log4j.Logger;
 
 import java.sql.*;
 import java.util.Arrays;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 import javax.sql.DataSource;
 
 /**
@@ -41,38 +38,17 @@ public class SqlStatisticsProvider implements StatisticsProvider {
         Logger.getLogger(SqlStatisticsProvider.class);
 
     /**
-     * Per-DataSource cache of Calcite planners used by the cardinality-
-     * probe dispatch. Reflecting a JDBC schema opens connections and runs
-     * metadata queries, so we amortize it by keying on the {@link
-     * DataSource} identity — the same caching pattern as {@code
-     * SegmentLoader.plannerFor}.
+     * Dispatches to {@link CalcitePlannerCache}, which is keyed on JDBC
+     * identity ({@code url, catalog, schema, user}). See
+     * {@code docs/reports/perf-investigation-y1.md} Fix #1.
      */
-    private static final ConcurrentMap<DataSource, CalciteSqlPlanner>
-        PROBE_PLANNER_CACHE = new ConcurrentHashMap<>();
-
     private static CalciteSqlPlanner plannerFor(DataSource dataSource) {
-        CalciteSqlPlanner cached = PROBE_PLANNER_CACHE.get(dataSource);
-        if (cached != null) {
-            return cached;
-        }
-        // Under backend=calcite we read the database product name straight
-        // from DatabaseMetaData via CalciteDialectMap.forDataSource. The
-        // Mondrian spi.Dialect instance is intentionally not consulted here
-        // — worktree #4 deletes those classes and the Calcite path cannot
-        // depend on them even for metadata.
-        CalciteMondrianSchema schema =
-            new CalciteMondrianSchema(dataSource, "mondrian");
-        CalciteSqlPlanner planner =
-            new CalciteSqlPlanner(
-                schema, CalciteDialectMap.forDataSource(dataSource));
-        CalciteSqlPlanner existing =
-            PROBE_PLANNER_CACHE.putIfAbsent(dataSource, planner);
-        return existing != null ? existing : planner;
+        return CalcitePlannerCache.plannerFor(dataSource);
     }
 
-    /** Test-only: drop the per-DataSource probe planner cache. */
+    /** Test-only: drop the shared Calcite planner cache. */
     public static void clearCalcitePlannerCache() {
-        PROBE_PLANNER_CACHE.clear();
+        CalcitePlannerCache.clear();
     }
 
     public int getTableCardinality(

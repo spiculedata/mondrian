@@ -176,8 +176,13 @@ public class CalciteOverheadProbeTest {
     }
 
     private static void runEndToEnd(NamedMdx query, int iterations) {
+        // Clear the planner cache ONCE up-front, so iteration 0 pays the
+        // metadata-reflection cost. After Y.2 the cache is keyed on JDBC
+        // identity (not RolapStar), so a Mondrian schema flush no longer
+        // evicts it — iteration 1+ should see steady-state. Clearing the
+        // cache each iteration (as before) would defeat that measurement.
+        SegmentLoader.clearCalcitePlannerCache();
         for (int i = 0; i < iterations; i++) {
-            SegmentLoader.clearCalcitePlannerCache();
             CalciteProfile.reset();
             long t0 = System.nanoTime();
             FoodMartCapture.CapturedRun run =

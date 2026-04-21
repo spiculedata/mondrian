@@ -14,9 +14,8 @@ package mondrian.rolap;
 import mondrian.calc.TupleList;
 import mondrian.calc.impl.ListTupleList;
 import mondrian.calc.impl.UnaryTupleList;
-import mondrian.calcite.CalciteDialectMap;
-import mondrian.calcite.CalciteMondrianSchema;
 import mondrian.calcite.CalcitePlannerAdapters;
+import mondrian.calcite.CalcitePlannerCache;
 import mondrian.calcite.CalciteSqlPlanner;
 import mondrian.calcite.MondrianBackend;
 import mondrian.calcite.PlannerRequest;
@@ -39,8 +38,6 @@ import org.apache.log4j.Logger;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 import javax.sql.DataSource;
 
 import static mondrian.rolap.LevelColumnLayout.OrderKeySource.*;
@@ -88,30 +85,19 @@ public class SqlTupleReader implements TupleReader {
     private static final Logger LOGGER =
         Logger.getLogger(SqlTupleReader.class);
 
-    /** Per-DataSource cache of Calcite planners for tuple-read dispatch.
-     *  Keyed by DataSource identity (same cache-bust story as the
-     *  SegmentLoader's per-star planner cache). */
-    private static final ConcurrentMap<DataSource, CalciteSqlPlanner>
-        CALCITE_PLANNER_CACHE = new ConcurrentHashMap<>();
-
-    /** Test-only: drop the per-DataSource Calcite planner cache. */
+    /**
+     * Test-only: drop the shared Calcite planner cache. Delegates to
+     * {@link CalcitePlannerCache#clear()}. The per-DataSource cache was
+     * replaced by JDBC-identity keying (see
+     * {@code docs/reports/perf-investigation-y1.md} Fix #1) so the warm
+     * {@code CalciteMondrianSchema} survives {@code RolapStar} churn.
+     */
     public static void clearCalcitePlannerCache() {
-        CALCITE_PLANNER_CACHE.clear();
+        CalcitePlannerCache.clear();
     }
 
     private static CalciteSqlPlanner plannerFor(DataSource dataSource) {
-        CalciteSqlPlanner cached = CALCITE_PLANNER_CACHE.get(dataSource);
-        if (cached != null) {
-            return cached;
-        }
-        CalciteMondrianSchema schema =
-            new CalciteMondrianSchema(dataSource, "mondrian");
-        CalciteSqlPlanner planner =
-            new CalciteSqlPlanner(
-                schema, CalciteDialectMap.forDataSource(dataSource));
-        CalciteSqlPlanner existing =
-            CALCITE_PLANNER_CACHE.putIfAbsent(dataSource, planner);
-        return existing != null ? existing : planner;
+        return CalcitePlannerCache.plannerFor(dataSource);
     }
 
     protected final TupleConstraint constraint;

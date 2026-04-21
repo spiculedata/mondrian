@@ -87,18 +87,43 @@ public class PerfBenchmarkTest {
         HarnessBackend backend = HarnessBackend.current();
         MondrianBackend emitter = MondrianBackend.current();
 
+        // Optional: -Dharness.bench.corpus=<smoke|aggregate|calc|mvhit>
+        // (comma-separated) filters which corpora run. Default = all.
+        String corpusFilter =
+            System.getProperty("harness.bench.corpus", "").trim();
+        java.util.Set<String> include;
+        if (corpusFilter.isEmpty()) {
+            include = null; // all
+        } else {
+            include = new java.util.HashSet<>();
+            for (String s : corpusFilter.toLowerCase(Locale.ROOT).split(",")) {
+                s = s.trim();
+                if (!s.isEmpty()) {
+                    include.add(s);
+                }
+            }
+        }
+
         List<Target> targets = new ArrayList<>();
-        for (NamedMdx q : SmokeCorpus.queries()) {
-            targets.add(new Target("smoke", q, false));
+        if (include == null || include.contains("smoke")) {
+            for (NamedMdx q : SmokeCorpus.queries()) {
+                targets.add(new Target("smoke", q, false));
+            }
         }
-        for (NamedMdx q : AggregateCorpus.queries()) {
-            targets.add(new Target("aggregate", q, false));
+        if (include == null || include.contains("aggregate")) {
+            for (NamedMdx q : AggregateCorpus.queries()) {
+                targets.add(new Target("aggregate", q, false));
+            }
         }
-        for (NamedMdx q : CalcCorpus.queries()) {
-            targets.add(new Target("calc", q, false));
+        if (include == null || include.contains("calc")) {
+            for (NamedMdx q : CalcCorpus.queries()) {
+                targets.add(new Target("calc", q, false));
+            }
         }
-        for (MvHitCorpus.Entry e : MvHitCorpus.entries()) {
-            targets.add(new Target("mvhit", e.mdx, true));
+        if (include == null || include.contains("mvhit")) {
+            for (MvHitCorpus.Entry e : MvHitCorpus.entries()) {
+                targets.add(new Target("mvhit", e.mdx, true));
+            }
         }
 
         // Pin the emitter for the duration of this run so every corpus
@@ -154,12 +179,16 @@ public class PerfBenchmarkTest {
         }
         try {
             // Warm-up (discarded). Also validates the query actually runs
-            // on this cell before we start timing.
+            // on this cell before we start timing. After Y.2 the Calcite
+            // planner cache is keyed on JDBC identity (not RolapStar), so
+            // clearing it per iteration defeats the cache that Mondrian's
+            // schema flush is supposed to survive. Clear exactly once at
+            // the start of warm-up so the first iteration is truly cold.
             int sqlCount = 0;
             boolean nonEmpty = false;
             String topLeft = null;
+            SegmentLoader.clearCalcitePlannerCache();
             for (int i = 0; i < WARMUP; i++) {
-                SegmentLoader.clearCalcitePlannerCache();
                 FoodMartCapture.CapturedRun run =
                     FoodMartCapture.executeCold(t.mdx, null);
                 if (i == 0) {
@@ -174,7 +203,6 @@ public class PerfBenchmarkTest {
             long[] ns = new long[TIMED];
             int sqlCountLastTimed = 0;
             for (int i = 0; i < TIMED; i++) {
-                SegmentLoader.clearCalcitePlannerCache();
                 long t0 = System.nanoTime();
                 FoodMartCapture.CapturedRun run =
                     FoodMartCapture.executeCold(t.mdx, null);

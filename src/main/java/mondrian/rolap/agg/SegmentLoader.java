@@ -10,9 +10,8 @@
 */
 package mondrian.rolap.agg;
 
-import mondrian.calcite.CalciteDialectMap;
-import mondrian.calcite.CalciteMondrianSchema;
 import mondrian.calcite.CalcitePlannerAdapters;
+import mondrian.calcite.CalcitePlannerCache;
 import mondrian.calcite.CalciteSqlPlanner;
 import mondrian.calcite.MondrianBackend;
 import mondrian.calcite.PlannerRequest;
@@ -36,8 +35,6 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 
 /**
  * <p>The <code>SegmentLoader</code> queries database and loads the data into
@@ -63,16 +60,6 @@ public class SegmentLoader {
     protected final SegmentCacheManager cacheMgr;
 
     /**
-     * Per-RolapStar cache of Calcite planners. Reflecting a JDBC schema is
-     * expensive (opens connections, queries metadata) so we amortize it by
-     * keying the planner on the star instance. Identity-keyed: stars are
-     * recreated when the schema is flushed, which is the cache-bust signal
-     * we want.
-     */
-    private static final ConcurrentMap<RolapStar, CalciteSqlPlanner>
-        CALCITE_PLANNER_CACHE = new ConcurrentHashMap<>();
-
-    /**
      * Creates a SegmentLoader.
      *
      * @param cacheMgr Cache manager
@@ -84,38 +71,38 @@ public class SegmentLoader {
     private static final boolean CALCITE_PROFILE =
         Boolean.getBoolean("harness.calcite.profile");
 
+    /**
+     * Dispatches to {@link CalcitePlannerCache} keyed on JDBC identity
+     * ({@code url, catalog, schema, user}) rather than on the
+     * {@link RolapStar}. Mondrian's per-query schema-cache flush churns
+     * the star; keying on the star invalidated a warm
+     * {@code CalciteMondrianSchema} on every query, forcing JDBC
+     * metadata reflection (~1.5 s on Postgres) per query. See
+     * {@code docs/reports/perf-investigation-y1.md} (Fix #1).
+     */
     private static CalciteSqlPlanner plannerFor(RolapStar star) {
-        CalciteSqlPlanner cached = CALCITE_PLANNER_CACHE.get(star);
-        if (cached != null) {
-            if (CALCITE_PROFILE) {
-                mondrian.calcite.CalciteProfile.record(
-                    "SegmentLoader.plannerFor.hit", 0L);
-            }
-            return cached;
-        }
-        // Under backend=calcite we deliberately avoid consulting
-        // mondrian.spi.Dialect for product-name lookup; those classes are
-        // slated for removal in worktree #4. Read the product name straight
-        // off DatabaseMetaData via CalciteDialectMap.forDataSource.
         long t0 = CALCITE_PROFILE ? System.nanoTime() : 0L;
-        CalciteMondrianSchema schema =
-            new CalciteMondrianSchema(star.getDataSource(), "mondrian");
         CalciteSqlPlanner planner =
-            new CalciteSqlPlanner(
-                schema,
-                CalciteDialectMap.forDataSource(star.getDataSource()));
-        CalciteSqlPlanner existing =
-            CALCITE_PLANNER_CACHE.putIfAbsent(star, planner);
+            CalcitePlannerCache.plannerFor(star.getDataSource());
         if (CALCITE_PROFILE) {
+            // We no longer distinguish hit/miss here — the cache probe is
+            // a quick DatabaseMetaData read and the planner build happens
+            // once per JVM per JDBC identity. Record total under the
+            // legacy bucket name for continuity with Y.1 reports.
             mondrian.calcite.CalciteProfile.record(
-                "SegmentLoader.plannerFor.miss", System.nanoTime() - t0);
+                "SegmentLoader.plannerFor", System.nanoTime() - t0);
         }
-        return existing != null ? existing : planner;
+        return planner;
     }
 
-    /** Test-only: drop the per-star Calcite planner cache. */
+    /**
+     * Test-only: drop the shared Calcite planner cache. Delegates to
+     * {@link CalcitePlannerCache#clear()}; the SegmentLoader-level cache
+     * no longer exists (keyed on {@code RolapStar}, it invalidated on
+     * every Mondrian schema flush and so never hit).
+     */
     public static void clearCalcitePlannerCache() {
-        CALCITE_PLANNER_CACHE.clear();
+        CalcitePlannerCache.clear();
     }
 
     /**
