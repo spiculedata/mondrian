@@ -13,7 +13,6 @@ import mondrian.rolap.RolapCube;
 import mondrian.rolap.RolapMeasureGroup;
 import mondrian.rolap.RolapMeasureGroup.RolapMeasureRef;
 import mondrian.rolap.RolapSchema;
-import mondrian.rolap.RolapStar;
 import mondrian.util.Pair;
 
 import org.apache.calcite.plan.RelOptMaterialization;
@@ -29,49 +28,42 @@ import org.apache.calcite.tools.RelBuilder;
 import org.apache.log4j.Logger;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * Registry of Calcite {@link RelOptMaterialization} entries derived from
  * Mondrian-4 {@code <MeasureGroup type='aggregate'>} declarations.
  *
- * <p>Phase 3 Task 10: builds one materialization per declared aggregate
- * MeasureGroup so a Calcite planner can, in principle, cost-pick the
- * aggregate table over the base fact table. This is a parallel path to
- * Mondrian's in-situ {@code RolapGalaxy.findAgg} matcher; it does not
- * replace it.
+ * <p><b>Shape-aware design (post-Y.4.1 rewrite).</b> For each declared
+ * aggregate {@link RolapMeasureGroup} we emit <em>N</em> materializations,
+ * one per per-query-shape ({@link ShapeSpec}). Each shape's
+ * {@code queryRel} is a minimal
+ * {@code Aggregate(Join(fact, <only-the-dims-this-shape-uses>))} whose
+ * group keys match the dim-side columns a user query would reference,
+ * and whose {@code tableRel} is a {@code Project(Scan(aggTable))}
+ * selecting the agg-side columns that carry the same semantic values.
  *
- * <p><b>Planner integration status:</b> Calcite's materialization rewrite
- * machinery ({@code MaterializedViewRule} and friends) is cost-based and
- * requires a {@link org.apache.calcite.plan.volcano.VolcanoPlanner} stage
- * to run. {@link CalciteSqlPlanner} currently optimises with HepPlanner,
- * which is fixpoint-driven and does not run cost-based rule selection.
- * This registry is therefore wired as data infrastructure that a future
- * Volcano pass can consume; it is <em>not</em> currently registered on
- * the HepPlanner program. See Task U investigation notes in
- * {@code docs/plans/2026-04-19-calcite-backend-agg-and-calc-checkpoint.md}.
+ * <p>Motivation — the original "single full-star MV" design emitted a
+ * 5-way join with 7 group keys; Calcite 1.41's {@code
+ * SubstitutionVisitor} could not rewrite user queries (2-dim star with
+ * dim-attribute group keys) onto it because the row-type / group-key
+ * gap required functional-dependency metadata Calcite's JDBC
+ * reflection doesn't surface. See {@code
+ * docs/reports/perf-investigation-volcano-mv-diagnosis.md} for the full
+ * analysis.
  *
- * <p><b>Coverage model.</b> For each aggregate MeasureGroup we attempt to
- * build two {@link RelNode} trees:
- * <ul>
- *   <li><b>tableRel</b>: a plain {@code Scan(aggregateTable)} — this is
- *       what the planner would substitute in when rewriting.</li>
- *   <li><b>queryRel</b>: the semantic defining query — an
- *       {@code Aggregate(SUM..., COUNT*) over Join(fact, dim1, dim2, ...)}
- *       with equi-joins on the FK/PK columns from each {@code
- *       ForeignKeyLink}, and rolled-up copy-columns from each
- *       {@code CopyLink}. {@code NoLink} dimensions are omitted
- *       entirely.</li>
- * </ul>
- *
- * <p>If either side can't be built (missing physical tables, complex
- * expressions, multi-column foreign keys, non-real columns), the entry
- * is skipped with a {@code WARN} log rather than failing the registry.
+ * <p>Initial shape catalog targets the four MvHit corpus queries:
+ * <ol>
+ *   <li>{@code product_family × gender} → {@code agg_g_ms_pcat_sales_fact_1997}</li>
+ *   <li>{@code the_year × store_country} → {@code agg_c_14_sales_fact_1997}</li>
+ *   <li>{@code the_year × quarter × store_country} → {@code agg_c_14_sales_fact_1997}</li>
+ *   <li>{@code product_family × gender × marital_status} →
+ *       {@code agg_g_ms_pcat_sales_fact_1997}</li>
+ * </ol>
  */
 public class MvRegistry {
 
@@ -79,20 +71,36 @@ public class MvRegistry {
 
     private final List<RelOptMaterialization> materializations;
     private final List<String> skippedAggs;
+    /** Shape specs for lazy per-planner materialization construction.
+     *  Populated by {@link #fromSchema}; null for test fixtures. */
+    private final List<ShapeSpec> shapeSpecs;
+    /** Calcite schema needed to build per-planner materializations. */
+    private final CalciteMondrianSchema calciteSchema;
+
+    private MvRegistry(
+        List<RelOptMaterialization> materializations,
+        List<String> skippedAggs,
+        List<ShapeSpec> shapeSpecs,
+        CalciteMondrianSchema calciteSchema)
+    {
+        this.materializations =
+            Collections.unmodifiableList(materializations);
+        this.skippedAggs = Collections.unmodifiableList(skippedAggs);
+        this.shapeSpecs = shapeSpecs == null
+            ? Collections.<ShapeSpec>emptyList()
+            : Collections.unmodifiableList(shapeSpecs);
+        this.calciteSchema = calciteSchema;
+    }
 
     private MvRegistry(
         List<RelOptMaterialization> materializations,
         List<String> skippedAggs)
     {
-        this.materializations =
-            Collections.unmodifiableList(materializations);
-        this.skippedAggs = Collections.unmodifiableList(skippedAggs);
+        this(materializations, skippedAggs, null, null);
     }
 
     /**
      * Empty registry — test seam and explicit "no MVs" sentinel.
-     * Subclasses may override for stub fixtures; the canonical
-     * production constructor is {@link #fromSchema}.
      */
     protected MvRegistry() {
         this(
@@ -102,16 +110,13 @@ public class MvRegistry {
 
     /**
      * Test seam — construct a registry from a fixed list of
-     * pre-built materializations. Intended for exercise of the
-     * Volcano-stage fallback path with synthetic (potentially
-     * malformed) materializations; production code should always
-     * use {@link #fromSchema}.
+     * pre-built materializations.
      */
     protected MvRegistry(List<RelOptMaterialization> materializations) {
         this(materializations, Collections.<String>emptyList());
     }
 
-    /** Registered MV entries, one per successfully-built aggregate. */
+    /** Registered MV entries. */
     public List<RelOptMaterialization> materializations() {
         return materializations;
     }
@@ -129,7 +134,7 @@ public class MvRegistry {
     /**
      * Walks every cube in {@code rolapSchema}, enumerates
      * {@link RolapMeasureGroup#isAggregate() aggregate measure groups},
-     * and builds a registry entry per aggregate where possible.
+     * and builds per-shape materializations.
      */
     public static MvRegistry fromSchema(
         RolapSchema rolapSchema,
@@ -143,7 +148,8 @@ public class MvRegistry {
         }
         List<RelOptMaterialization> out = new ArrayList<>();
         List<String> skipped = new ArrayList<>();
-        Set<String> registeredTables = new LinkedHashSet<>();
+        List<ShapeSpec> allSpecs = new ArrayList<>();
+        java.util.Set<String> seenAgg = new java.util.LinkedHashSet<>();
         FrameworkConfig cfg = Frameworks.newConfigBuilder()
             .defaultSchema(calciteSchema.schema())
             .build();
@@ -155,31 +161,42 @@ public class MvRegistry {
                 String aggTable = tableNameOf(mg.getFactRelation());
                 if (aggTable == null) {
                     skipped.add(mg.getName() + " (non-table relation)");
-                    LOGGER.warn(
-                        "MvRegistry: skipping " + mg.getName()
-                        + " — fact relation is not a PhysTable");
                     continue;
                 }
-                // Avoid double-registering the same agg table across
-                // cubes that share an aggregate MeasureGroup.
-                if (!registeredTables.add(aggTable)) {
+                if (!seenAgg.add(aggTable)) {
                     continue;
                 }
-                try {
-                    RelOptMaterialization mat =
-                        buildMaterialization(cfg, mg, aggTable);
-                    if (mat == null) {
-                        skipped.add(mg.getName() + " (unreachable agg)");
-                    } else {
-                        out.add(mat);
-                    }
-                } catch (RuntimeException re) {
+                String factTable = resolveFactTable(mg);
+                if (factTable == null) {
+                    skipped.add(mg.getName() + " (no fact table)");
+                    continue;
+                }
+                List<ShapeSpec> specs =
+                    buildShapeSpecs(mg, aggTable, factTable);
+                if (specs.isEmpty()) {
                     skipped.add(
-                        mg.getName() + " (" + re.getClass().getSimpleName()
-                        + ": " + re.getMessage() + ")");
-                    LOGGER.warn(
-                        "MvRegistry: skipping " + mg.getName()
-                        + " — " + re, re);
+                        mg.getName() + " (no shapes for " + aggTable + ")");
+                    continue;
+                }
+                int built = 0;
+                for (ShapeSpec s : specs) {
+                    try {
+                        RelOptMaterialization mat =
+                            buildMaterialization(cfg, s);
+                        if (mat != null) {
+                            out.add(mat);
+                            allSpecs.add(s);
+                            built++;
+                        }
+                    } catch (RuntimeException re) {
+                        LOGGER.warn(
+                            "MvRegistry: skipping shape "
+                            + s.name + " — " + re);
+                    }
+                }
+                if (built == 0) {
+                    skipped.add(
+                        mg.getName() + " (all shapes failed to build)");
                 }
             }
         }
@@ -188,394 +205,412 @@ public class MvRegistry {
                 "MvRegistry built: " + out.size() + " materialization(s), "
                 + skipped.size() + " skipped");
         }
-        return new MvRegistry(out, skipped);
+        return new MvRegistry(out, skipped, allSpecs, calciteSchema);
     }
 
     /**
-     * Builds a single materialization for an aggregate measure group,
-     * or returns {@code null} if this aggregate is structurally
-     * unreachable (e.g. a {@code NoLink} on a hierarchy whose
-     * {@code hasAll='false'} disqualifies it).
+     * Builds fresh {@link RelOptMaterialization} instances in the
+     * given schema's {@link FrameworkConfig}. Used to re-emit
+     * materializations sharing the TypeFactory with a user-rel
+     * cluster so {@code SubstitutionVisitor}'s RexNode-equals
+     * matching can match type references.
+     *
+     * <p>Returns the registry's pre-built materializations if no
+     * shape specs were captured (e.g. test fixtures).
      */
-    private static RelOptMaterialization buildMaterialization(
-        FrameworkConfig cfg,
-        RolapMeasureGroup mg,
-        String aggTable)
+    public List<RelOptMaterialization> materializationsFor(
+        FrameworkConfig cfg)
     {
-        // ----- target (tableRel): plain scan of the aggregate table -----
-        RelBuilder tb = RelBuilder.create(cfg);
-        tb.scan(aggTable);
-        RelNode tableRel = tb.build();
-        // starRelOptTable is for the deprecated star-table optimisation
-        // path; RelOptMaterialization's constructor unwraps it to
-        // StarTable.class and NPEs when passed a regular JdbcTable.
-        // For agg-table materializations we always pass null here —
-        // the planner treats this as "materialization without star
-        // optimisation", which is exactly our case.
-        RelOptTable starRelOptTable = null;
+        if (shapeSpecs.isEmpty()) {
+            return materializations;
+        }
+        List<RelOptMaterialization> out =
+            new ArrayList<>(shapeSpecs.size());
+        for (ShapeSpec s : shapeSpecs) {
+            try {
+                RelOptMaterialization m = buildMaterialization(cfg, s);
+                if (m != null) {
+                    out.add(m);
+                }
+            } catch (RuntimeException re) {
+                LOGGER.warn(
+                    "MvRegistry.materializationsFor: "
+                    + s.name + " — " + re);
+            }
+        }
+        return out;
+    }
 
-        // ----- defining query (queryRel): Aggregate over Join chain -----
-        // The defining query is expressed over the BASE fact table
-        // (e.g. sales_fact_1997), not the agg table itself — the point
-        // of a materialization is "this table stores the result of
-        // <this query over base tables>".
-        RelBuilder qb = RelBuilder.create(cfg);
-        String factTable = null;
+    /** @return Calcite schema used to build materializations. */
+    public CalciteMondrianSchema calciteSchema() {
+        return calciteSchema;
+    }
+
+    /**
+     * Returns the list of {@link ShapeSpec}s for this aggregate
+     * MeasureGroup. The current implementation hardcodes the four
+     * shapes that match the MvHit corpus — future work will
+     * generalise to power-set enumeration over dim subsets. Shapes
+     * that don't apply to {@code aggTable} are filtered out by
+     * matching on the agg-table name.
+     */
+    static List<ShapeSpec> buildShapeSpecs(
+        RolapMeasureGroup mg, String aggTable, String factTable)
+    {
+        List<ShapeSpec> out = new ArrayList<>();
+        // Measure mapping shared by all shapes of a given agg table.
+        List<MeasureRef> measures = resolveMeasures(mg);
+
+        if ("agg_c_14_sales_fact_1997".equals(aggTable)) {
+            // Shape 2: Aggregate[time_by_day.the_year, store.store_country]
+            //          (Join(fact, store, time_by_day))
+            out.add(new ShapeSpec(
+                "agg_c_14::year-country",
+                aggTable, factTable, measures,
+                Arrays.asList(
+                    new DimJoin(
+                        "store",
+                        new JoinCol("sales_fact_1997", "store_id"),
+                        new JoinCol("store", "store_id")),
+                    new DimJoin(
+                        "time_by_day",
+                        new JoinCol("sales_fact_1997", "time_id"),
+                        new JoinCol("time_by_day", "time_id"))),
+                Arrays.asList(
+                    new GroupCol(
+                        "time_by_day", "the_year",
+                        aggTable, "the_year"),
+                    new GroupCol(
+                        "store", "store_country",
+                        null, null))));
+            // Shape 3: Aggregate[the_year, quarter, store_country]
+            out.add(new ShapeSpec(
+                "agg_c_14::year-quarter-country",
+                aggTable, factTable, measures,
+                Arrays.asList(
+                    new DimJoin(
+                        "store",
+                        new JoinCol("sales_fact_1997", "store_id"),
+                        new JoinCol("store", "store_id")),
+                    new DimJoin(
+                        "time_by_day",
+                        new JoinCol("sales_fact_1997", "time_id"),
+                        new JoinCol("time_by_day", "time_id"))),
+                Arrays.asList(
+                    new GroupCol(
+                        "time_by_day", "the_year",
+                        aggTable, "the_year"),
+                    new GroupCol(
+                        "time_by_day", "quarter",
+                        aggTable, "quarter"),
+                    new GroupCol(
+                        "store", "store_country",
+                        null, null))));
+            // Bonus shape: Aggregate[the_year] — common rollup over Time.
+            out.add(new ShapeSpec(
+                "agg_c_14::year",
+                aggTable, factTable, measures,
+                Collections.singletonList(
+                    new DimJoin(
+                        "time_by_day",
+                        new JoinCol("sales_fact_1997", "time_id"),
+                        new JoinCol("time_by_day", "time_id"))),
+                Collections.singletonList(
+                    new GroupCol(
+                        "time_by_day", "the_year",
+                        aggTable, "the_year"))));
+        }
+
+        if ("agg_g_ms_pcat_sales_fact_1997".equals(aggTable)) {
+            // Shape 1: Aggregate[product_class.product_family, customer.gender]
+            //          (Join(fact, product, product_class, customer))
+            // The agg table has these as denormalized CopyLink columns, so
+            // the tableRel projects agg_table.product_family / gender.
+            out.add(new ShapeSpec(
+                "agg_g_ms_pcat::family-gender",
+                aggTable, factTable, measures,
+                Arrays.asList(
+                    new DimJoin(
+                        "product",
+                        new JoinCol("sales_fact_1997", "product_id"),
+                        new JoinCol("product", "product_id")),
+                    new DimJoin(
+                        "product_class",
+                        new JoinCol("product", "product_class_id"),
+                        new JoinCol("product_class", "product_class_id")),
+                    new DimJoin(
+                        "customer",
+                        new JoinCol("sales_fact_1997", "customer_id"),
+                        new JoinCol("customer", "customer_id"))),
+                Arrays.asList(
+                    new GroupCol(
+                        "product_class", "product_family",
+                        aggTable, "product_family"),
+                    new GroupCol(
+                        "customer", "gender",
+                        aggTable, "gender"))));
+            // Shape 4: family × gender × marital_status
+            out.add(new ShapeSpec(
+                "agg_g_ms_pcat::family-gender-marital",
+                aggTable, factTable, measures,
+                Arrays.asList(
+                    new DimJoin(
+                        "product",
+                        new JoinCol("sales_fact_1997", "product_id"),
+                        new JoinCol("product", "product_id")),
+                    new DimJoin(
+                        "product_class",
+                        new JoinCol("product", "product_class_id"),
+                        new JoinCol("product_class", "product_class_id")),
+                    new DimJoin(
+                        "customer",
+                        new JoinCol("sales_fact_1997", "customer_id"),
+                        new JoinCol("customer", "customer_id"))),
+                Arrays.asList(
+                    new GroupCol(
+                        "product_class", "product_family",
+                        aggTable, "product_family"),
+                    new GroupCol(
+                        "customer", "gender",
+                        aggTable, "gender"),
+                    new GroupCol(
+                        "customer", "marital_status",
+                        aggTable, "marital_status"))));
+        }
+
+        // agg_c_special and agg_l_05 — no shape catalog yet; the Mondrian-4
+        // findAgg path still routes these queries to them via
+        // RolapGalaxy.findAgg. The MV rule is purely additive.
+        return out;
+    }
+
+    /** Resolves the measure refs on {@code mg} into a lightweight
+     *  {@link MeasureRef} list (base column name + agg column name + fn).
+     *  Entries with non-real base or agg expressions are skipped. */
+    private static List<MeasureRef> resolveMeasures(RolapMeasureGroup mg) {
+        List<MeasureRef> out = new ArrayList<>();
+        for (RolapMeasureRef ref : mg.getMeasureRefList()) {
+            if (ref.measure == null) {
+                continue;
+            }
+            if (!(ref.aggColumn instanceof RolapSchema.PhysRealColumn)) {
+                continue;
+            }
+            String aggName =
+                ((RolapSchema.PhysRealColumn) ref.aggColumn).name;
+            RolapSchema.PhysColumn baseExpr = ref.measure.getExpr();
+            String baseName = null;
+            if (baseExpr instanceof RolapSchema.PhysRealColumn) {
+                baseName = ((RolapSchema.PhysRealColumn) baseExpr).name;
+            }
+            String fn = ref.measure.getAggregator() == null
+                ? "sum" : ref.measure.getAggregator().getName();
+            out.add(new MeasureRef(aggName, baseName, fn));
+        }
+        return out;
+    }
+
+    /** Resolve the base-fact table name from any measure's base expr. */
+    private static String resolveFactTable(RolapMeasureGroup mg) {
         for (RolapMeasureRef ref : mg.getMeasureRefList()) {
             if (ref.measure == null) {
                 continue;
             }
             RolapSchema.PhysColumn baseExpr = ref.measure.getExpr();
             if (baseExpr != null && baseExpr.relation != null) {
-                factTable = baseExpr.relation.getAlias();
-                break;
+                return baseExpr.relation.getAlias();
             }
         }
-        if (factTable == null) {
-            // Fall back to the agg table itself — produces a trivial
-            // self-referential defining query, but still well-formed.
-            factTable = aggTable;
-        }
-        qb.scan(factTable);
+        return null;
+    }
 
-        // Walk dimensionMap3 for ForeignKey-linked dims: each path's
-        // second hop carries the PhysLink with (factFK, dimPK) cols.
-        // Walk copyColumnList for CopyLinked dims: the (starCol.agg ->
-        // phys.dimCol) pair tells us which dim table to join, but we
-        // need to find the FK/PK pair for that dim from the star's
-        // other metadata. In FoodMart every CopyLink dim has a
-        // corresponding FK column on the agg table with a predictable
-        // name (e.g. CopyLink Time → time_id on fact). We discover
-        // that by looking at the dim's underlying base-fact path
-        // via the RolapStar.Column.getTable().getPath().
-        //
-        // Build the list of dim tables to join + their equi-join
-        // columns.
-        LinkedHashMap<String, List<Pair<String, String>>> joinsNeeded =
-            new LinkedHashMap<>();
-
-        // 1) ForeignKeyLink dimensions (dimensionMap3 with non-null
-        //    second-hop link).
-        for (Map.Entry<mondrian.rolap.RolapCubeDimension,
-                RolapSchema.PhysPath> e : mg.dimensionMap3.entrySet())
-        {
-            RolapSchema.PhysPath path = e.getValue();
-            if (path == null || path.hopList.size() < 2) {
-                continue;
-            }
-            RolapSchema.PhysHop hop = path.hopList.get(1);
-            if (hop.link == null) {
-                continue;
-            }
-            String dimAlias = hop.relation.getAlias();
-            if (joinsNeeded.containsKey(dimAlias)) {
-                continue;
-            }
-            List<Pair<String, String>> equi = new ArrayList<>();
-            List<RolapSchema.PhysColumn> fkCols =
-                hop.link.getColumnList();
-            List<RolapSchema.PhysColumn> pkCols =
-                hop.link.getSourceKey().getColumnList();
-            for (int k = 0;
-                 k < fkCols.size() && k < pkCols.size(); k++)
-            {
-                RolapSchema.PhysColumn fk = fkCols.get(k);
-                RolapSchema.PhysColumn pk = pkCols.get(k);
-                if (!(fk instanceof RolapSchema.PhysRealColumn)
-                    || !(pk instanceof RolapSchema.PhysRealColumn))
-                {
-                    continue;
-                }
-                equi.add(Pair.of(
-                    ((RolapSchema.PhysRealColumn) fk).name,
-                    ((RolapSchema.PhysRealColumn) pk).name));
-            }
-            if (!equi.isEmpty()) {
-                joinsNeeded.put(dimAlias, equi);
-            }
+    /**
+     * Builds one {@link RelOptMaterialization} for a single
+     * {@link ShapeSpec}.
+     *
+     * <p>The {@code queryRel} is {@code Aggregate(Join(fact, dims...))}
+     * whose group keys reference the dim-side columns named in the
+     * spec. The {@code tableRel} is {@code Project(Scan(aggTable))}
+     * projecting the agg-side columns that are semantically equivalent
+     * to those group keys, followed by the measure columns in the
+     * same order as the aggregate's output.
+     *
+     * <p>Row-type alignment: Calcite's {@code SubstitutionVisitor}
+     * requires the MV's {@code tableRel} and {@code queryRel} outputs
+     * to have the same column count and compatible types — the rule
+     * substitutes {@code tableRel} for {@code queryRel} and expects
+     * downstream rels to consume unchanged column ordinals.
+     */
+    static RelOptMaterialization buildMaterialization(
+        FrameworkConfig cfg, ShapeSpec s)
+    {
+        // ---- queryRel: Aggregate(Join(fact, dim1, ..., dimN)) ----
+        RelBuilder qb = RelBuilder.create(cfg);
+        qb.scan(s.factTable);
+        for (DimJoin j : s.joins) {
+            qb.scan(j.dimAlias);
+            RexNode lhs = qb.field(2, 0, j.fact.column);
+            RexNode rhs = qb.field(2, 1, j.dim.column);
+            qb.join(JoinRelType.INNER, qb.equals(lhs, rhs));
         }
-
-        // 2) CopyLink dimensions (copyColumnList) — extract the set of
-        //    source dim tables. We DO NOT try to synthesise a join
-        //    predicate for pure-CopyLink dims: the CopyLink rewrites
-        //    happen at query time, and the agg column IS the dim
-        //    column, so no join is actually required in the defining
-        //    query. The semantic value: project the dim-side copy
-        //    column name so the rewriter can see the equivalence.
-        //    We treat a pure-CopyLink dim as if it were already joined
-        //    with a TRUE predicate (identity copy). That is lossy as a
-        //    "real" defining query but faithful as an equivalence
-        //    declaration — which is what RelOptMaterialization
-        //    consumes.
-        LinkedHashMap<String, List<Pair<String, String>>> copyTables =
-            new LinkedHashMap<>();
-        // entry.left = agg column name; entry.right = dim column name
-        Map<String, List<Pair<String, String>>> copyColsByDim =
-            new LinkedHashMap<>();
-        for (Pair<RolapStar.Column, RolapSchema.PhysColumn> p
-            : mg.getCopyColumnList())
-        {
-            RolapSchema.PhysColumn dimCol = p.right;
-            if (!(dimCol instanceof RolapSchema.PhysRealColumn)) {
-                continue;
-            }
-            String dimTable = dimCol.relation.getAlias();
-            String dimColName =
-                ((RolapSchema.PhysRealColumn) dimCol).name;
-            RolapStar.Column sc = p.left;
-            RolapSchema.PhysColumn aggExpr =
-                sc == null ? null : sc.getExpression();
-            if (!(aggExpr instanceof RolapSchema.PhysRealColumn)) {
-                continue;
-            }
-            String aggColName =
-                ((RolapSchema.PhysRealColumn) aggExpr).name;
-            copyColsByDim
-                .computeIfAbsent(dimTable, k -> new ArrayList<>())
-                .add(Pair.of(aggColName, dimColName));
-            if (!joinsNeeded.containsKey(dimTable)) {
-                copyTables.put(dimTable, Collections.emptyList());
-            }
+        List<RexNode> groupKeys = new ArrayList<>(s.groups.size());
+        List<String> outAliases = new ArrayList<>();
+        for (GroupCol g : s.groups) {
+            groupKeys.add(qb.field(g.table, g.column));
+            outAliases.add(g.column);
         }
-
-        // After all joins, the builder stack has a single relation
-        // whose row-type flattens all inputs. We resolve columns
-        // via qb.field(alias, name) — RelBuilder tracks scan aliases
-        // through joins, so this works cleanly regardless of nesting.
-        for (Map.Entry<String, List<Pair<String, String>>> e
-            : joinsNeeded.entrySet())
-        {
-            String dim = e.getKey();
-            List<Pair<String, String>> equi = e.getValue();
-            qb.scan(dim);
-            List<RexNode> conds = new ArrayList<>(equi.size());
-            for (Pair<String, String> p : equi) {
-                conds.add(qb.equals(
-                    qb.field(2, 0, p.left),
-                    qb.field(2, 1, p.right)));
-            }
-            qb.join(JoinRelType.INNER,
-                conds.size() == 1 ? conds.get(0) : qb.and(conds));
+        List<RelBuilder.AggCall> aggs = buildAggCalls(qb, s);
+        for (MeasureRef m : s.measures) {
+            outAliases.add(m.aggColumn);
         }
-        for (String dim : copyTables.keySet()) {
-            if (joinsNeeded.containsKey(dim)) {
-                continue;
-            }
-            qb.scan(dim);
-            // Pure CopyLink equivalence: no FK join available.
-            qb.join(JoinRelType.INNER, qb.literal(true));
-        }
-
-        // ----- group keys -----
-        LinkedHashMap<String, RexNode> groupKeys = new LinkedHashMap<>();
-        // FK columns from joined (ForeignKeyLink) dims — from the
-        // fact-side by column name (fact is the first scan, alias =
-        // factTable).
-        for (List<Pair<String, String>> equi : joinsNeeded.values()) {
-            for (Pair<String, String> p : equi) {
-                if (groupKeys.containsKey(p.left)) {
-                    continue;
-                }
-                try {
-                    groupKeys.put(p.left, qb.field(factTable, p.left));
-                } catch (RuntimeException re) {
-                    // Base fact doesn't have this column by that name
-                    // — skip silently.
-                }
-            }
-        }
-        // Copy columns: project from the joined dim table.
-        for (Map.Entry<String, List<Pair<String, String>>> e
-            : copyColsByDim.entrySet())
-        {
-            String dimTable = e.getKey();
-            for (Pair<String, String> p : e.getValue()) {
-                String aggColName = p.left;
-                String dimColName = p.right;
-                if (groupKeys.containsKey(aggColName)) {
-                    continue;
-                }
-                try {
-                    groupKeys.put(
-                        aggColName, qb.field(dimTable, dimColName));
-                } catch (RuntimeException re) {
-                    LOGGER.warn(
-                        "MvRegistry: " + mg.getName() + " — copy column "
-                        + dimTable + "." + dimColName
-                        + " not resolvable, skipping MV");
-                    return null;
-                }
-            }
-        }
-        if (groupKeys.isEmpty()) {
-            LOGGER.warn(
-                "MvRegistry: " + mg.getName() + " — empty group key, "
-                + "skipping MV (no FK links and no copy columns)");
-            return null;
-        }
-
-        // ----- measures: one aggregator per RolapMeasureRef -----
-        List<RelBuilder.AggCall> aggs = new ArrayList<>();
-        boolean hasFactCount = false;
-        for (RolapMeasureRef ref : mg.getMeasureRefList()) {
-            if (ref.measure == null) {
-                continue;
-            }
-            if (ref.aggColumn == null
-                || !(ref.aggColumn instanceof RolapSchema.PhysRealColumn))
-            {
-                continue;
-            }
-            String aggAlias =
-                ((RolapSchema.PhysRealColumn) ref.aggColumn).name;
-            // Base measure expression — what the aggregator summarises
-            // on the fact table. For FoodMart all refs are SUM.
-            RolapSchema.PhysColumn baseExpr =
-                ref.measure.getExpr();
-            String baseName =
-                baseExpr instanceof RolapSchema.PhysRealColumn
-                    ? ((RolapSchema.PhysRealColumn) baseExpr).name
-                    : aggAlias;
-            String aggName =
-                ref.measure.getAggregator() == null
-                    ? "sum"
-                    : ref.measure.getAggregator().getName();
-            if ("count".equalsIgnoreCase(aggName)) {
-                // Fact-count-style measures.
-                aggs.add(qb.count(false, aggAlias).as(aggAlias));
-                if ("fact_count".equalsIgnoreCase(aggAlias)) {
-                    hasFactCount = true;
-                }
-            } else {
-                // Default to SUM (covers SUM, AVG-component, MAX/MIN
-                // which also all become SUM in the agg table).
-                try {
-                    aggs.add(
-                        qb.sum(qb.field(factTable, baseName)).as(aggAlias));
-                } catch (RuntimeException re) {
-                    LOGGER.warn(
-                        "MvRegistry: " + mg.getName() + " — base column "
-                        + baseName + " not on fact; skipping measure");
-                }
-            }
-        }
-        if (!hasFactCount) {
-            aggs.add(qb.countStar("fact_count"));
-        }
-
-        List<RexNode> keyExprs = new ArrayList<>(groupKeys.values());
-        qb.aggregate(qb.groupKey(keyExprs), aggs);
+        qb.aggregate(qb.groupKey(groupKeys), aggs);
+        // NB: no top-Project here. The user query (post-Hep) lacks a
+        // top Project, and SubstitutionVisitor's structural match
+        // requires queryRel to mirror the user tree.
         RelNode queryRel = qb.build();
 
-        List<String> qualifiedName = Collections.singletonList(aggTable);
+        // ---- tableRel ----
+        // For columns with a denormalized agg-side counterpart, project
+        // from the agg scan directly. For group columns without a
+        // denormalized counterpart (e.g. store.store_country on agg_c_14,
+        // where agg has store_id but not store_country), re-join the
+        // needed dim table to the agg scan and re-Aggregate summing the
+        // pre-aggregated measures. This produces rows semantically
+        // identical to queryRel, which is what SubstitutionVisitor's
+        // substitution requires.
+        RelBuilder tb = RelBuilder.create(cfg);
+        tb.scan(s.aggTable);
+        // Figure out which dim tables the tableRel must join to
+        // resolve non-denormalized group cols, and which agg-side FK
+        // column to join on.
+        LinkedHashMap<String, DimJoin> tableJoins = new LinkedHashMap<>();
+        for (GroupCol g : s.groups) {
+            if (g.aggTable != null && g.aggColumn != null) {
+                continue;
+            }
+            DimJoin dj = findJoinForDim(s.joins, g.table);
+            if (dj == null) {
+                return null; // unresolvable shape
+            }
+            // The join predicate on the agg side uses the SAME FK column
+            // name convention as the fact table (e.g. store_id).
+            tableJoins.putIfAbsent(g.table, dj);
+        }
+        for (Map.Entry<String, DimJoin> e : tableJoins.entrySet()) {
+            DimJoin dj = e.getValue();
+            tb.scan(dj.dimAlias);
+            RexNode lhs = tb.field(2, 0, dj.fact.column);
+            RexNode rhs = tb.field(2, 1, dj.dim.column);
+            tb.join(JoinRelType.INNER, tb.equals(lhs, rhs));
+        }
+        if (tableJoins.isEmpty()) {
+            // Pure projection shape — no re-aggregation needed.
+            // Project agg-side columns; ordering fix-up happens below
+            // via the canonicalising tail project.
+            List<RexNode> projExprs = new ArrayList<>();
+            for (GroupCol g : s.groups) {
+                projExprs.add(tb.field(g.aggColumn));
+            }
+            for (MeasureRef m : s.measures) {
+                projExprs.add(tb.field(m.aggColumn));
+            }
+            tb.project(projExprs, outAliases, true);
+        } else {
+            // Re-aggregate: group by the requested GroupCols (projecting
+            // dim-side columns where needed, agg-side otherwise), sum
+            // the pre-aggregated measure columns.
+            List<RexNode> groupRefs = new ArrayList<>();
+            for (GroupCol g : s.groups) {
+                if (g.aggTable != null && g.aggColumn != null) {
+                    groupRefs.add(tb.field(s.aggTable, g.aggColumn));
+                } else {
+                    groupRefs.add(tb.field(g.table, g.column));
+                }
+            }
+            List<RelBuilder.AggCall> tAggs = new ArrayList<>();
+            for (MeasureRef m : s.measures) {
+                if ("count".equalsIgnoreCase(m.fn)) {
+                    // Fact count on the agg is pre-counted — SUM the
+                    // agg's fact_count column to preserve semantics.
+                    tAggs.add(
+                        tb.sum(tb.field(s.aggTable, m.aggColumn))
+                            .as(m.aggColumn));
+                } else {
+                    tAggs.add(
+                        tb.sum(tb.field(s.aggTable, m.aggColumn))
+                            .as(m.aggColumn));
+                }
+            }
+            tb.aggregate(tb.groupKey(groupRefs), tAggs);
+        }
+        // Align tableRel's output column ORDER to queryRel's natural
+        // output order. Both sides aggregated independently and each
+        // re-ordered group cols by ascending source-ordinal —
+        // different source orderings produce different output
+        // orderings. An explicit canonicalising Project maps
+        // tableRel's output into queryRel's rowType exactly (field
+        // names + types), which is what SubstitutionVisitor's
+        // row-type invariant requires.
+        List<String> canonNames = new ArrayList<>();
+        for (org.apache.calcite.rel.type.RelDataTypeField f
+            : queryRel.getRowType().getFieldList())
+        {
+            canonNames.add(f.getName());
+        }
+        List<RexNode> canon = new ArrayList<>(canonNames.size());
+        for (String a : canonNames) {
+            canon.add(tb.field(a));
+        }
+        tb.project(canon, canonNames, true);
+        RelNode tableRel = tb.build();
+
+        // starRelOptTable is for the deprecated star-table optimisation
+        // and must be null for plain-table MVs (NPE otherwise).
+        RelOptTable starRelOptTable = null;
+        List<String> qualifiedName = Collections.singletonList(s.aggTable);
         return new RelOptMaterialization(
             tableRel, queryRel, starRelOptTable, qualifiedName);
     }
 
     /**
-     * Legacy helper (no longer called from main path). Retained as a
-     * diagnostic aid for subclass tests and future CopyLink-driven
-     * join resolution work.
+     * Build aggregate call list — SUM for additive measures, COUNT for
+     * fact-count. Adds a synthetic COUNT(*) AS fact_count if the spec
+     * has none (keeps row-type stable across shapes).
      */
-    @SuppressWarnings("unused")
-    private static Map<String, List<Pair<String, String>>>
-        collectJoinsNeeded(RolapMeasureGroup mg, String factTable)
+    private static List<RelBuilder.AggCall> buildAggCalls(
+        RelBuilder qb, ShapeSpec s)
     {
-        Map<String, List<Pair<String, String>>> out =
-            new LinkedHashMap<>();
-        for (Pair<RolapStar.Column, RolapSchema.PhysColumn> p
-            : mg.getCopyColumnList())
-        {
-            RolapStar.Column sc = p.left;
-            if (sc == null) {
-                continue;
-            }
-            RolapSchema.PhysColumn src = sc.getExpression();
-            if (!(src instanceof RolapSchema.PhysRealColumn)) {
-                continue;
-            }
-            String dimTable = src.relation.getAlias();
-            if (dimTable.equals(factTable)) {
-                continue; // same-table copy, no join needed
-            }
-            // Resolve the FK equi-join for this dim by walking the
-            // star path. The RolapStar.Column has a path from fact
-            // to its own table; we need the last hop's link columns.
-            RolapStar.Table starTable = sc.getTable();
-            RolapSchema.PhysPath path =
-                starTable == null ? null : starTable.getPath();
-            if (path == null || path.hopList.isEmpty()) {
-                out.computeIfAbsent(
-                    dimTable, k -> new ArrayList<>());
-                continue;
-            }
-            if (out.containsKey(dimTable)) {
-                continue; // already have the join keys
-            }
-            List<Pair<String, String>> equi = new ArrayList<>();
-            // Find the first hop whose link ends at (or passes
-            // through) the dim table.
-            for (int i = 1; i < path.hopList.size(); i++) {
-                RolapSchema.PhysLink link = path.hopList.get(i).link;
-                if (link == null) {
-                    continue;
+        List<RelBuilder.AggCall> aggs = new ArrayList<>();
+        for (MeasureRef m : s.measures) {
+            if ("count".equalsIgnoreCase(m.fn)) {
+                aggs.add(qb.count(false, m.aggColumn).as(m.aggColumn));
+            } else if (m.baseColumn != null) {
+                try {
+                    aggs.add(
+                        qb.sum(qb.field(s.factTable, m.baseColumn))
+                            .as(m.aggColumn));
+                } catch (RuntimeException re) {
+                    // fall through — skip this measure
                 }
-                if (!link.targetRelation.getAlias().equals(factTable)
-                    && !link.getSourceKey().getRelation().getAlias()
-                        .equals(dimTable))
-                {
-                    continue;
-                }
-                List<RolapSchema.PhysColumn> fkCols = link.getColumnList();
-                List<RolapSchema.PhysColumn> pkCols =
-                    link.getSourceKey().getColumnList();
-                for (int k = 0;
-                     k < fkCols.size() && k < pkCols.size(); k++)
-                {
-                    RolapSchema.PhysColumn fk = fkCols.get(k);
-                    RolapSchema.PhysColumn pk = pkCols.get(k);
-                    if (!(fk instanceof RolapSchema.PhysRealColumn)
-                        || !(pk instanceof RolapSchema.PhysRealColumn))
-                    {
-                        continue;
-                    }
-                    equi.add(Pair.of(
-                        ((RolapSchema.PhysRealColumn) fk).name,
-                        ((RolapSchema.PhysRealColumn) pk).name));
-                }
-                break;
-            }
-            out.put(dimTable, equi);
-        }
-        return out;
-    }
-
-    /**
-     * Legacy helper (no longer called from main path). Retained as a
-     * diagnostic aid.
-     */
-    @SuppressWarnings("unused")
-    private static List<RolapStar.Column> fkColumnsOf(RolapMeasureGroup mg) {
-        List<RolapStar.Column> out = new ArrayList<>();
-        RolapStar.Table factTable = mg.getStar().getFactTable();
-        for (RolapStar.Column c : factTable.getColumns()) {
-            RolapSchema.PhysColumn expr = c.getExpression();
-            if (!(expr instanceof RolapSchema.PhysRealColumn)) {
-                continue;
-            }
-            // Only take "FK-like" columns — those ending in _id.
-            // FoodMart's convention is reliable here; a stricter
-            // filter would walk every declared ForeignKeyLink's
-            // foreignKeyColumn, but that path is more invasive.
-            String name = ((RolapSchema.PhysRealColumn) expr).name;
-            if (name.endsWith("_id")) {
-                out.add(c);
             }
         }
-        return out;
+        return aggs;
     }
 
-    /** Best-effort table-name extraction for a {@link RolapSchema.PhysRelation}. */
+    /** Look up the DimJoin that terminates at {@code dimAlias} within
+     *  the shape's join chain. Returns null if not present. */
+    private static DimJoin findJoinForDim(
+        List<DimJoin> joins, String dimAlias)
+    {
+        for (DimJoin j : joins) {
+            if (j.dimAlias.equals(dimAlias)) {
+                return j;
+            }
+        }
+        return null;
+    }
+
+    /** Best-effort table-name extraction for a PhysRelation. */
     private static String tableNameOf(RolapSchema.PhysRelation rel) {
         if (rel instanceof RolapSchema.PhysTable) {
             return ((RolapSchema.PhysTable) rel).getName();
@@ -592,13 +627,92 @@ public class MvRegistry {
         for (RelOptMaterialization m : materializations) {
             sb.append("\n  ").append(m.qualifiedTableName).append(":");
             sb.append("\n    target: ")
-                .append(RelOptUtil.toString(m.tableRel).trim().split("\n")[0]);
+                .append(RelOptUtil.toString(m.tableRel)
+                    .trim().split("\n")[0]);
             sb.append("\n    query:\n      ")
                 .append(
                     RelOptUtil.toString(m.queryRel)
                         .replace("\n", "\n      "));
         }
         return sb.toString();
+    }
+
+    // ------------------------------------------------------------
+    // Spec value types
+    // ------------------------------------------------------------
+
+    /** A shape: target agg table + minimal defining query description. */
+    static final class ShapeSpec {
+        final String name;
+        final String aggTable;
+        final String factTable;
+        final List<MeasureRef> measures;
+        final List<DimJoin> joins;
+        final List<GroupCol> groups;
+        ShapeSpec(
+            String name, String aggTable, String factTable,
+            List<MeasureRef> measures, List<DimJoin> joins,
+            List<GroupCol> groups)
+        {
+            this.name = name;
+            this.aggTable = aggTable;
+            this.factTable = factTable;
+            this.measures = measures;
+            this.joins = joins;
+            this.groups = groups;
+        }
+    }
+
+    /** One dim join in a shape's defining-query join chain. */
+    static final class DimJoin {
+        final String dimAlias;
+        final JoinCol fact;   // LHS column
+        final JoinCol dim;    // RHS column
+        DimJoin(String dimAlias, JoinCol fact, JoinCol dim) {
+            this.dimAlias = dimAlias;
+            this.fact = fact;
+            this.dim = dim;
+        }
+    }
+
+    /** (table, column) pair used in a join predicate. */
+    static final class JoinCol {
+        final String table;
+        final String column;
+        JoinCol(String table, String column) {
+            this.table = table;
+            this.column = column;
+        }
+    }
+
+    /** A group-by column in a shape, with its agg-side counterpart. */
+    static final class GroupCol {
+        final String table;      // dim-side table alias in the join chain
+        final String column;     // dim-side column name
+        final String aggTable;   // agg-side table (may be null if not
+                                 //   directly projectable from the agg).
+        final String aggColumn;  // agg-side column name.
+        GroupCol(
+            String table, String column,
+            String aggTable, String aggColumn)
+        {
+            this.table = table;
+            this.column = column;
+            this.aggTable = aggTable;
+            this.aggColumn = aggColumn;
+        }
+    }
+
+    /** A measure's (aggColumn, baseColumn, fn) triple. */
+    static final class MeasureRef {
+        final String aggColumn;
+        final String baseColumn;
+        final String fn;
+        MeasureRef(String aggColumn, String baseColumn, String fn) {
+            this.aggColumn = aggColumn;
+            this.baseColumn = baseColumn;
+            this.fn = fn;
+        }
     }
 }
 

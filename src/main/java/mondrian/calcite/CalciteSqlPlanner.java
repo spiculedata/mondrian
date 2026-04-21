@@ -350,7 +350,22 @@ public final class CalciteSqlPlanner {
             return input;
         }
         try {
-            VolcanoPlanner planner = new VolcanoPlanner();
+            // MaterializedView rules only run when the planner's
+            // context contains a CalciteConnectionConfig with
+            // materializationsEnabled=true. The default no-arg
+            // VolcanoPlanner has an empty context; without an
+            // explicit config, registerMaterializations() short-
+            // circuits and no MV rule ever fires.
+            java.util.Properties props = new java.util.Properties();
+            props.setProperty(
+                org.apache.calcite.config.CalciteConnectionProperty
+                    .MATERIALIZATIONS_ENABLED.camelName(), "true");
+            org.apache.calcite.config.CalciteConnectionConfig connConfig =
+                new org.apache.calcite.config.CalciteConnectionConfigImpl(
+                    props);
+            org.apache.calcite.plan.Context planCtx =
+                org.apache.calcite.plan.Contexts.of(connConfig);
+            VolcanoPlanner planner = new VolcanoPlanner(planCtx);
             planner.addRelTraitDef(ConventionTraitDef.INSTANCE);
             // Core abstract-relational equivalences; safe w.r.t.
             // JDBC unparse (no Enumerable conversion).
