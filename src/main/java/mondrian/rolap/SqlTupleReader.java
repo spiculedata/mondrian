@@ -96,8 +96,10 @@ public class SqlTupleReader implements TupleReader {
         CalcitePlannerCache.clear();
     }
 
-    private static CalciteSqlPlanner plannerFor(DataSource dataSource) {
-        return CalcitePlannerCache.plannerFor(dataSource);
+    private static CalciteSqlPlanner plannerFor(
+        DataSource dataSource, RolapSchema schema)
+    {
+        return CalcitePlannerCache.plannerFor(dataSource, schema);
     }
 
     protected final TupleConstraint constraint;
@@ -531,7 +533,13 @@ public class SqlTupleReader implements TupleReader {
                     PlannerRequest req =
                         CalcitePlannerAdapters.fromTupleRead(
                             readLevels, constraint);
-                    CalciteSqlPlanner planner = plannerFor(dataSource);
+                    RolapSchema schema =
+                        readLevels.isEmpty()
+                            ? null
+                            : readLevels.get(0).getHierarchy()
+                                .getRolapSchema();
+                    CalciteSqlPlanner planner =
+                        plannerFor(dataSource, schema);
                     String calciteSql = planner.plan(req);
                     if (Boolean.getBoolean("mondrian.calcite.trace")) {
                         System.err.println(

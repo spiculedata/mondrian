@@ -200,6 +200,11 @@ public final class CalciteSqlPlanner {
         return mvRegistry;
     }
 
+    /** @return the {@link CalciteMondrianSchema} used by this planner. */
+    public CalciteMondrianSchema schema() {
+        return schema;
+    }
+
     // ------------------------------------------------------------------
     // Plan-snapshot capture (harness hook).
     //

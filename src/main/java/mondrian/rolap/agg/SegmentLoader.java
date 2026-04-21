@@ -83,7 +83,8 @@ public class SegmentLoader {
     private static CalciteSqlPlanner plannerFor(RolapStar star) {
         long t0 = CALCITE_PROFILE ? System.nanoTime() : 0L;
         CalciteSqlPlanner planner =
-            CalcitePlannerCache.plannerFor(star.getDataSource());
+            CalcitePlannerCache.plannerFor(
+                star.getDataSource(), star.getSchema());
         if (CALCITE_PROFILE) {
             // We no longer distinguish hit/miss here — the cache probe is
             // a quick DatabaseMetaData read and the planner build happens

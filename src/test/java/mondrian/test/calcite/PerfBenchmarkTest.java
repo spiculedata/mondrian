@@ -170,13 +170,12 @@ public class PerfBenchmarkTest {
     private QueryResult runQuery(Target t, MondrianProperties p) {
         boolean prevReadAgg = p.ReadAggregates.get();
         boolean prevUseAgg = p.UseAggregates.get();
-        if (t.mvHit) {
-            p.ReadAggregates.set(true);
-            p.UseAggregates.set(true);
-        } else {
-            p.ReadAggregates.set(false);
-            p.UseAggregates.set(false);
-        }
+        boolean forceUseAgg =
+            Boolean.parseBoolean(System.getProperty(
+                "harness.bench.useAggregates",
+                t.mvHit ? "true" : "false"));
+        p.ReadAggregates.set(forceUseAgg);
+        p.UseAggregates.set(forceUseAgg);
         try {
             // Warm-up (discarded). Also validates the query actually runs
             // on this cell before we start timing. After Y.2 the Calcite

@@ -72,8 +72,22 @@ public final class CalcitePlannerCache {
         mondrian.rolap.RolapSchema rolapSchema)
     {
         Key key = Key.from(ds);
-        return CACHE.computeIfAbsent(
+        CalciteSqlPlanner planner = CACHE.computeIfAbsent(
             key, k -> build(ds, rolapSchema));
+        // Late-bind the registry if the first caller didn't have a
+        // RolapSchema (e.g. SqlStatisticsProvider's cardinality probe
+        // fires before any tuple-read or segment-load). Otherwise
+        // MaterializedViewRule has nothing to match against.
+        if (rolapSchema != null && planner.mvRegistry() == null) {
+            try {
+                planner.attachMvRegistry(
+                    MvRegistry.fromSchema(
+                        rolapSchema, planner.schema()));
+            } catch (RuntimeException re) {
+                // purely additive; ignore
+            }
+        }
+        return planner;
     }
 
     private static CalciteSqlPlanner build(
