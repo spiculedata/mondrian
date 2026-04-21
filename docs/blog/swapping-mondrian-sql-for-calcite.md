@@ -1,5 +1,7 @@
 # Swapping Mondrian's SQL emitter for Apache Calcite
 
+*The long, nerdy version. For the business-audience 1,800-word write-up, see [What We Learned Replacing a 20-Year-Old SQL Engine With Apache Calcite](https://conceptto.cloud/news/replacing-mondrian-sql-engine-with-calcite). This post has the planner internals, the five walls I hit trying to make `MaterializedViewRule` fire, the benchmarking-methodology lesson, and all the numbers.*
+
 *Or: how I replaced 20 years of hand-tuned dialect code with a general-purpose SQL planner, broke performance by 27%, fixed a single `ConcurrentHashMap` key, recovered 4× faster on one database and 10× faster on another, and learned that your benchmarks will lie to you if you run them wrong.*
 
 **TL;DR**
@@ -338,4 +340,6 @@ The Postgres parity is the interesting one to sit with. Calcite isn't making Pos
 
 ---
 
-*Code at [...]. Full investigation notes at `docs/reports/perf-analysis-final.md`. Harness at `EquivalenceSmokeTest` / `EquivalenceAggregateTest` / `EquivalenceCalcTest` / `MvHitTest`. Perf benchmark reproducer: `scripts/perf/run-bench-matrix.sh`.*
+*Code lives on the `calcite-backend-agg-and-calc` branch of our Mondrian fork. Full investigation notes at `docs/reports/perf-analysis-final.md`. Harness entry points: `EquivalenceSmokeTest`, `EquivalenceAggregateTest`, `EquivalenceCalcTest`, `MvHitTest`. Perf benchmark reproducer: `scripts/perf/run-bench-matrix.sh`.*
+
+*If you want the shorter, less-nerdy version with the business takeaways and no planner internals, it's [on our main site](https://conceptto.cloud/news/replacing-mondrian-sql-engine-with-calcite).*
