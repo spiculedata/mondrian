@@ -313,6 +313,200 @@ public final class PlannerRequest {
         return !measures.isEmpty() || !groupBy.isEmpty();
     }
 
+    // ------------------------------------------------------------------
+    // Structural-hash / literal extraction helpers, used by
+    // CalciteSqlTemplateCache (Task 6 perf: reuse unparsed SQL across
+    // same-shape requests that differ only in literal values).
+    // ------------------------------------------------------------------
+
+    /**
+     * Stable 64-bit structural hash: two {@code PlannerRequest}s hash
+     * identically iff they have the same fact, joins (order-sensitive),
+     * groupBy columns, measures (fn+column+alias+distinct),
+     * projections, filter columns+operators (NOT literal values),
+     * tupleFilter columns (NOT literal rows), orderBy, distinct,
+     * universalFalse, havings (measure+op, NOT literal threshold),
+     * and computed-measure aliases.
+     *
+     * <p>Literal values are intentionally excluded so requests that
+     * differ only in the values (e.g. {@code year=1997} vs
+     * {@code year=1998}) collide to the same shape — the cache then
+     * substitutes literals into the pre-unparsed SQL template.
+     */
+    public long structuralHash() {
+        long h = 1125899906842597L; // large prime seed
+        h = 31 * h + factTable.hashCode();
+        for (Join j : joins) {
+            h = 31 * h + (j.dimTable == null ? 0 : j.dimTable.hashCode());
+            h = 31 * h + (j.factKey == null ? 0 : j.factKey.hashCode());
+            h = 31 * h + (j.dimKey == null ? 0 : j.dimKey.hashCode());
+            h = 31 * h + j.kind.hashCode();
+            h = 31 * h + (j.leftTable == null ? 0 : j.leftTable.hashCode());
+        }
+        for (Column c : groupBy) {
+            h = 31 * h + colHash(c);
+        }
+        for (Measure m : measures) {
+            h = 31 * h + m.fn.hashCode();
+            h = 31 * h + colHash(m.column);
+            h = 31 * h + m.alias.hashCode();
+            h = 31 * h + Boolean.hashCode(m.distinct);
+        }
+        for (Column c : projections) {
+            h = 31 * h + colHash(c);
+        }
+        for (Filter f : filters) {
+            h = 31 * h + colHash(f.column);
+            h = 31 * h + f.op.hashCode();
+            // Exclude literal values; include literal count (IN arity
+            // affects SQL shape: col=v vs col=v1 OR col=v2).
+            h = 31 * h + f.literals.size();
+        }
+        for (TupleFilter tf : tupleFilters) {
+            for (Column c : tf.columns) {
+                h = 31 * h + colHash(c);
+            }
+            h = 31 * h + tf.rows.size(); // row count affects OR-chain arity
+        }
+        for (Having hav : havings) {
+            h = 31 * h + hav.measure.alias.hashCode();
+            h = 31 * h + hav.op.hashCode();
+        }
+        for (ComputedMeasure cm : computedMeasures) {
+            h = 31 * h + cm.alias.hashCode();
+        }
+        for (OrderBy o : orderBy) {
+            h = 31 * h + colHash(o.column);
+            h = 31 * h + o.direction.hashCode();
+        }
+        h = 31 * h + Boolean.hashCode(distinct);
+        h = 31 * h + Boolean.hashCode(universalFalse);
+        return h;
+    }
+
+    private static int colHash(Column c) {
+        int h = c.name == null ? 0 : c.name.hashCode();
+        h = 31 * h + (c.table == null ? 0 : c.table.hashCode());
+        return h;
+    }
+
+    /**
+     * Collision-safe structural equality. Two requests are structurally
+     * equal iff their {@link #structuralHash()} components match
+     * field-for-field (excluding literal values). Used by
+     * {@code CalciteSqlTemplateCache} as a confirmation check on
+     * hash-table lookup.
+     */
+    public boolean structurallyEqual(PlannerRequest other) {
+        if (other == null) return false;
+        if (!factTable.equals(other.factTable)) return false;
+        if (joins.size() != other.joins.size()) return false;
+        for (int i = 0; i < joins.size(); i++) {
+            Join a = joins.get(i), b = other.joins.get(i);
+            if (!java.util.Objects.equals(a.dimTable, b.dimTable)) return false;
+            if (!java.util.Objects.equals(a.factKey, b.factKey)) return false;
+            if (!java.util.Objects.equals(a.dimKey, b.dimKey)) return false;
+            if (a.kind != b.kind) return false;
+            if (!java.util.Objects.equals(a.leftTable, b.leftTable))
+                return false;
+        }
+        if (!sameColumns(groupBy, other.groupBy)) return false;
+        if (measures.size() != other.measures.size()) return false;
+        for (int i = 0; i < measures.size(); i++) {
+            Measure a = measures.get(i), b = other.measures.get(i);
+            if (a.fn != b.fn) return false;
+            if (!sameColumn(a.column, b.column)) return false;
+            if (!a.alias.equals(b.alias)) return false;
+            if (a.distinct != b.distinct) return false;
+        }
+        if (!sameColumns(projections, other.projections)) return false;
+        if (filters.size() != other.filters.size()) return false;
+        for (int i = 0; i < filters.size(); i++) {
+            Filter a = filters.get(i), b = other.filters.get(i);
+            if (!sameColumn(a.column, b.column)) return false;
+            if (a.op != b.op) return false;
+            if (a.literals.size() != b.literals.size()) return false;
+        }
+        if (tupleFilters.size() != other.tupleFilters.size()) return false;
+        for (int i = 0; i < tupleFilters.size(); i++) {
+            TupleFilter a = tupleFilters.get(i),
+                b = other.tupleFilters.get(i);
+            if (!sameColumns(a.columns, b.columns)) return false;
+            if (a.rows.size() != b.rows.size()) return false;
+        }
+        if (havings.size() != other.havings.size()) return false;
+        for (int i = 0; i < havings.size(); i++) {
+            Having a = havings.get(i), b = other.havings.get(i);
+            if (!a.measure.alias.equals(b.measure.alias)) return false;
+            if (a.op != b.op) return false;
+        }
+        if (computedMeasures.size() != other.computedMeasures.size())
+            return false;
+        for (int i = 0; i < computedMeasures.size(); i++) {
+            ComputedMeasure a = computedMeasures.get(i),
+                b = other.computedMeasures.get(i);
+            if (!a.alias.equals(b.alias)) return false;
+            // Note: expression trees are not compared here — calc
+            // pushdown paths don't participate in the cache anyway
+            // (noop fallback if needed).
+        }
+        if (orderBy.size() != other.orderBy.size()) return false;
+        for (int i = 0; i < orderBy.size(); i++) {
+            OrderBy a = orderBy.get(i), b = other.orderBy.get(i);
+            if (!sameColumn(a.column, b.column)) return false;
+            if (a.direction != b.direction) return false;
+        }
+        if (distinct != other.distinct) return false;
+        if (universalFalse != other.universalFalse) return false;
+        return true;
+    }
+
+    private static boolean sameColumn(Column a, Column b) {
+        return java.util.Objects.equals(a.name, b.name)
+            && java.util.Objects.equals(a.table, b.table);
+    }
+
+    private static boolean sameColumns(List<Column> a, List<Column> b) {
+        if (a.size() != b.size()) return false;
+        for (int i = 0; i < a.size(); i++) {
+            if (!sameColumn(a.get(i), b.get(i))) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Ordered list of literal values that appear in the rendered SQL,
+     * in the same traversal order used by {@link CalciteSqlPlanner}:
+     * {@code filters} (each Filter's literals in order),
+     * {@code tupleFilters} (row-major, column-minor), then
+     * {@code havings} (in declaration order).
+     *
+     * <p>{@code universalFalse} is not expressed via these literals — it
+     * emits a fixed {@code WHERE FALSE}. Projections/measures/groupBy/
+     * joins contribute no literal values to the SQL.
+     */
+    public List<Object> literals() {
+        List<Object> out = new ArrayList<>();
+        if (!universalFalse) {
+            for (Filter f : filters) {
+                for (Object v : f.literals) {
+                    out.add(v);
+                }
+            }
+            for (TupleFilter tf : tupleFilters) {
+                for (List<Object> row : tf.rows) {
+                    for (Object v : row) {
+                        out.add(v);
+                    }
+                }
+            }
+        }
+        for (Having h : havings) {
+            out.add(h.literal);
+        }
+        return out;
+    }
+
     public static Builder builder(String factTable) {
         return new Builder(factTable);
     }
