@@ -80,6 +80,30 @@ public final class CalciteSqlPlanner {
             System.getProperty("mondrian.calcite.volcano", "true"));
 
     /**
+     * Calc-consume opt-in
+     * ({@code -Dmondrian.calcite.calcConsume=true}).
+     *
+     * <p>When false (default), the calc-bearing inner projection is
+     * wrapped by an outer projection that re-projects only {groupBy,
+     * measures}. Hep then folds both projections into the Aggregate
+     * (PROJECT_REMOVE on the outer identity, AGGREGATE_PROJECT_MERGE
+     * on the inner), so the calc is absent from the emitted SQL —
+     * preserving row-checksum parity for the legacy SegmentLoader.
+     *
+     * <p>When true, the outer wrapping is skipped. The calc-bearing
+     * Project survives Hep (non-identity shape; AGGREGATE_PROJECT_MERGE
+     * won't push expressions involving aggregate outputs down into
+     * the Aggregate), and {@link RelToSqlConverter} emits the
+     * arithmetic inline in the SELECT list. The SegmentLoader path
+     * to consume the SQL-computed column lives in Task 3'.
+     */
+    static boolean calcConsumeEnabled() {
+        return Boolean.parseBoolean(
+            System.getProperty(
+                "mondrian.calcite.calcConsume", "false"));
+    }
+
+    /**
      * Curated rule set for the {@link VolcanoPlanner} stage.
      *
      * <p>Limited to the {@code MaterializedView*} family plus
@@ -710,7 +734,26 @@ public final class CalciteSqlPlanner {
                 restoredAliases.add(cm.alias);
             }
             b.project(restored, restoredAliases, true);
-            if (hasComputed) {
+            if (hasComputed && !calcConsumeEnabled()) {
+                // Default-off path: wrap the calc-bearing inner
+                // projection in an outer project that re-projects only
+                // {groupBy, measures} so SegmentLoader's row shape
+                // matches the legacy path (row-checksum parity in the
+                // equivalence harness).
+                //
+                // Under this path, Hep's PROJECT_REMOVE drops the
+                // (identity) outer Project and AGGREGATE_PROJECT_MERGE
+                // folds the inner Project into the Aggregate — the
+                // calc column is erased from the SQL. That's
+                // intentional here: the Java evaluator recomputes the
+                // calc from the base-measure aggregates and cell-set
+                // parity still holds.
+                //
+                // The -Dmondrian.calcite.calcConsume=true path skips
+                // this wrapping entirely so the calc-bearing Project
+                // survives Hep and RelToSqlConverter emits the
+                // arithmetic in the SELECT list — see Task 1 baseline
+                // and docs/plans/2026-04-21-calc-pushdown-to-sql.md.
                 // RelBuilder eagerly folds adjacent Projects, which
                 // would erase the computed-measure expressions from
                 // the plan. Build the inner project as a fully-formed

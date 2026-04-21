@@ -74,6 +74,20 @@ public class CalcPushdownSqlTest {
 
     @Test
     public void calcRatioEmitsArithmeticInSql() {
+        String prev = System.getProperty("mondrian.calcite.calcConsume");
+        System.setProperty("mondrian.calcite.calcConsume", "true");
+        try {
+            runCalcRatio();
+        } finally {
+            if (prev == null) {
+                System.clearProperty("mondrian.calcite.calcConsume");
+            } else {
+                System.setProperty("mondrian.calcite.calcConsume", prev);
+            }
+        }
+    }
+
+    private void runCalcRatio() {
         String mdx =
             "with member [Measures].[Ratio] as"
             + " '[Measures].[Unit Sales] / [Measures].[Store Sales]'"
