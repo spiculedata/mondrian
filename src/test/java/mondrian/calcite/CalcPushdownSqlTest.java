@@ -87,6 +87,73 @@ public class CalcPushdownSqlTest {
         }
     }
 
+    @Test
+    public void divByZeroYieldsNullInSql() {
+        // ArithmeticCalcTranslator wraps x/y as CAST(x / NULLIF(y, 0))
+        // so SQL returns NULL on y=0 instead of throwing — matches
+        // Mondrian's Java empty-on-/0 for cell-set parity. Parity check
+        // here is static (pattern over emitted SQL); the live
+        // equivalence run is in EquivalenceCalcPushdownTest.
+        String prev = System.getProperty("mondrian.calcite.calcConsume");
+        System.setProperty("mondrian.calcite.calcConsume", "true");
+        try {
+            String sql = planRatioSql();
+            assertTrue(
+                "expected NULLIF guard for div-by-zero: " + sql,
+                sql.contains("NULLIF"));
+        } finally {
+            if (prev == null) {
+                System.clearProperty("mondrian.calcite.calcConsume");
+            } else {
+                System.setProperty("mondrian.calcite.calcConsume", prev);
+            }
+        }
+    }
+
+    private String planRatioSql() {
+        String mdx =
+            "with member [Measures].[Ratio] as"
+            + " '[Measures].[Unit Sales] / [Measures].[Store Sales]'"
+            + " select {[Measures].[Ratio]} on columns from Sales";
+        Query q = conn.parseQuery(mdx);
+        q.resolve();
+        Formula ratio = null;
+        for (Formula f : q.getFormulas()) {
+            if (f.getMdxMember() != null
+                && "Ratio".equals(f.getMdxMember().getName()))
+            {
+                ratio = f;
+                break;
+            }
+        }
+        Exp expr = ratio.getExpression();
+        ArithmeticCalcAnalyzer.Classification cls =
+            ArithmeticCalcAnalyzer.classify(
+                expr, java.util.Collections.emptySet());
+        PlannerRequest.Builder b =
+            PlannerRequest.builder("sales_fact_1997");
+        b.addGroupBy(new PlannerRequest.Column(null, "product_id"));
+        b.addMeasure(new PlannerRequest.Measure(
+            PlannerRequest.AggFn.SUM,
+            new PlannerRequest.Column(null, "unit_sales"),
+            "m0"));
+        b.addMeasure(new PlannerRequest.Measure(
+            PlannerRequest.AggFn.SUM,
+            new PlannerRequest.Column(null, "store_sales"),
+            "m1"));
+        Map<Object, String> refs = new LinkedHashMap<>();
+        String[] aliases = {"m0", "m1"};
+        int i = 0;
+        for (Member m : cls.baseMeasures) {
+            refs.put(m, aliases[i++]);
+        }
+        b.addComputedMeasure(new PlannerRequest.ComputedMeasure(
+            "ratio", expr, refs));
+        CalciteSqlPlanner planner =
+            new CalciteSqlPlanner(schema, HsqldbSqlDialect.DEFAULT);
+        return planner.plan(b.build());
+    }
+
     private void runCalcRatio() {
         String mdx =
             "with member [Measures].[Ratio] as"
