@@ -109,6 +109,65 @@ public class ShapeEnumeratorTest {
     }
 
     @Test
+    public void addsYearPrefixedVariantsAtCapBoundary() {
+        // agg_g_ms_pcat copy-links the_year, product_family, gender,
+        // marital_status. With cap=2, the power-set yields size-1 and
+        // size-2 subsets only; year-prefix should push no-year size-2
+        // subsets into size-3 variants (family+gender → year+family+
+        // gender, etc.) — those are NOT in the base power-set and are
+        // specifically what Mondrian's implicit-slicer shape needs.
+        Util.PropertyList props =
+            Util.parseConnectString(TestContext.getDefaultConnectString());
+        props.put("UseSchemaPool", "false");
+        Connection conn = DriverManager.getConnection(props, null, null);
+        try {
+            RolapSchema schema = ((RolapConnection) conn).getSchema();
+            RolapMeasureGroup mg = findAggMeasureGroup(
+                schema, "agg_g_ms_pcat_sales_fact_1997");
+            assertNotNull(mg);
+
+            List<MvRegistry.ShapeSpec> shapes =
+                ShapeEnumerator.enumerate(
+                    mg, "agg_g_ms_pcat_sales_fact_1997",
+                    "sales_fact_1997",
+                    Collections.<MvRegistry.MeasureRef>emptyList(),
+                    2);
+
+            // At least one size-3 shape exists — must be a year-variant
+            // since the power-set cap is 2.
+            boolean sawSize3 = false;
+            for (MvRegistry.ShapeSpec s : shapes) {
+                if (s.groups.size() == 3) {
+                    sawSize3 = true;
+                    // All size-3 shapes must include the_year.
+                    assertTrue(
+                        "size-3 shape must be year-prefixed, got "
+                            + s.name,
+                        hasYear(s.groups));
+                }
+            }
+            assertTrue(
+                "expected at least one size-3 year-prefixed variant",
+                sawSize3);
+
+            // Specifically: {gender, marital_status} → {year, gender,
+            // marital_status}. (product_family is on product_class,
+            // which is a snowflake dim — 2-hop fact→product→product_class
+            // is out of scope for Phase 1; gender/marital are direct
+            // 1-hop fact→customer FK joins.)
+            assertTrue(
+                "expected year+gender+marital_status year-variant shape, "
+                    + "got " + shapeNames(shapes),
+                hasShape(shapes,
+                    "time_by_day.the_year",
+                    "customer.gender",
+                    "customer.marital_status"));
+        } finally {
+            conn.close();
+        }
+    }
+
+    @Test
     public void respectsSubsetSizeCap() {
         Util.PropertyList props =
             Util.parseConnectString(TestContext.getDefaultConnectString());
@@ -126,11 +185,23 @@ public class ShapeEnumeratorTest {
                     "sales_fact_1997",
                     Collections.<MvRegistry.MeasureRef>emptyList(),
                     1);
+            // Base power-set honours the cap; year-prefix variants may
+            // add one to each no-year subset, so the max permitted
+            // size here is cap + 1.
             for (MvRegistry.ShapeSpec s : capped) {
                 assertTrue(
-                    "cap=1 must yield singleton shapes only, got "
+                    "cap=1 + year-variant must be ≤ 2, got "
                         + s.groups.size() + " in " + s.name,
-                    s.groups.size() == 1);
+                    s.groups.size() <= 2);
+            }
+            // Every size-2 shape at cap=1 must be year-prefixed.
+            for (MvRegistry.ShapeSpec s : capped) {
+                if (s.groups.size() == 2) {
+                    assertTrue(
+                        "size-2 at cap=1 must be year-prefixed, got "
+                            + s.name,
+                        hasYear(s.groups));
+                }
             }
         } finally {
             conn.close();
@@ -180,6 +251,48 @@ public class ShapeEnumeratorTest {
             }
         }
         return false;
+    }
+
+    private static boolean hasYear(List<MvRegistry.GroupCol> groups) {
+        for (MvRegistry.GroupCol g : groups) {
+            if ("time_by_day".equals(g.table)
+                && "the_year".equals(g.column))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasShape(
+        List<MvRegistry.ShapeSpec> shapes, String... tableDotCol)
+    {
+        java.util.Set<String> need =
+            new java.util.HashSet<>(java.util.Arrays.asList(tableDotCol));
+        for (MvRegistry.ShapeSpec s : shapes) {
+            if (s.groups.size() != need.size()) {
+                continue;
+            }
+            java.util.Set<String> have = new java.util.HashSet<>();
+            for (MvRegistry.GroupCol g : s.groups) {
+                have.add(g.table + "." + g.column);
+            }
+            if (have.equals(need)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String shapeNames(List<MvRegistry.ShapeSpec> shapes) {
+        StringBuilder sb = new StringBuilder();
+        for (MvRegistry.ShapeSpec s : shapes) {
+            if (sb.length() > 0) {
+                sb.append(", ");
+            }
+            sb.append(s.name);
+        }
+        return sb.toString();
     }
 
     private static int binomial(int n, int k) {

@@ -114,7 +114,62 @@ final class ShapeEnumerator {
                 out.add(spec);
             }
         }
+        // Year-prefix variants: Mondrian's implicit slicer often adds
+        // [Time].[Year] even when the MDX query doesn't mention it.
+        // For every enumerated shape that does NOT already contain
+        // the_year — and for which this MeasureGroup copy-links
+        // time_by_day.the_year — emit {year} ∪ subset. Matters most at
+        // the subset-size cap: the base power-set can't exceed cap, so
+        // year-prefix variants are the only way a cap-sized no-year
+        // subset gets its year-prefixed form into the registry.
+        MvRegistry.GroupCol yearCol = findYearCol(base);
+        if (yearCol != null) {
+            List<MvRegistry.ShapeSpec> yearVariants = new ArrayList<>();
+            for (MvRegistry.ShapeSpec s : out) {
+                if (containsYear(s.groups)) {
+                    continue;
+                }
+                List<MvRegistry.GroupCol> prefixed =
+                    new ArrayList<>(s.groups.size() + 1);
+                prefixed.add(yearCol);
+                prefixed.addAll(s.groups);
+                MvRegistry.ShapeSpec variant =
+                    buildShape(
+                        factToDimLinks, aggTable, factTable,
+                        measures, prefixed);
+                if (variant != null
+                    && seenShapeKey.add(shapeKey(variant)))
+                {
+                    yearVariants.add(variant);
+                }
+            }
+            out.addAll(yearVariants);
+        }
         return out;
+    }
+
+    private static MvRegistry.GroupCol findYearCol(
+        List<MvRegistry.GroupCol> base)
+    {
+        for (MvRegistry.GroupCol g : base) {
+            if ("time_by_day".equals(g.table)
+                && "the_year".equals(g.column))
+            {
+                return g;
+            }
+        }
+        return null;
+    }
+
+    private static boolean containsYear(List<MvRegistry.GroupCol> groups) {
+        for (MvRegistry.GroupCol g : groups) {
+            if ("time_by_day".equals(g.table)
+                && "the_year".equals(g.column))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Default max subset size, overridable via system property. */
