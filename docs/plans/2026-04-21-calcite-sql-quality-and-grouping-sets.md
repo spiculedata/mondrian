@@ -587,14 +587,36 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 
 Only if Phase 2 isn't enough OR future work needs cost-based optimisation (MV cost selection across candidates, custom rules). Sketched here so the scope is understood; not in the immediate sprint.
 
-## Task 9 (deferred): Wrap RelBuilder output in a Programs run
+## Task 9 (SHIPPED 2026-04-21): HepPlanner program with curated rewrite rules
 
-**Sketch:**
-- Wire `Programs.standard()` (or a curated subset) into `CalciteSqlPlanner.plan()`.
-- Constrain optimization to land in a JDBC-renderable convention.
-- Cache the planner-program result by `PlannerRequest` shape (keyed on the request's structural hash).
+**What actually shipped** (vs the original sketch):
 
-**Risk:** Calcite's optimiser is opinionated. Without careful trait/convention setup it'll produce trees that `RelToSqlConverter` can't unparse. Budget 3-5 days of iteration.
+- Picked `HepPlanner` over `VolcanoPlanner`. No cost model needed for rule-driven rewrites; Hep is simpler, deterministic, and sidesteps the trait/convention gymnastics Volcano demands. VolcanoPlanner stays deferred to T11 when cost tuning arrives.
+- `CalciteSqlPlanner.plan()` now runs a shared immutable `HepProgram` over the built `RelNode` between `planRel()` and `RelToSqlConverter`. A fresh `HepPlanner` instance is created per call (Hep is not thread-safe). Graceful fallback to the unoptimised tree on any `RuntimeException` inside the optimiser.
+- Shipped ruleset (the suggested six, all intact after testing):
+  - `CoreRules.FILTER_INTO_JOIN`
+  - `CoreRules.JOIN_CONDITION_PUSH`
+  - `CoreRules.FILTER_MERGE`
+  - `CoreRules.PROJECT_MERGE`
+  - `CoreRules.PROJECT_REMOVE`
+  - `CoreRules.AGGREGATE_PROJECT_MERGE`
+- No `Programs.standard()`, no MV-selection rules, no join-reorder rules — those belong to Tasks 10 and 11.
+- No planner-result caching beyond what Y.2's `CalcitePlannerCache` already provides; Hep runs inside `plan()`, so the existing `PlannerRequest`-keyed cache transparently covers the optimised output too.
+
+**Gates held:**
+
+- HSQLDB `Equivalence*Test` — 44/44 on both backends (legacy + calcite).
+- New `CalciteSqlPlannerHepTest` — 3/3 green (`hepPlannerMergesAdjacentProjects`, `hepPlannerPushesFilterIntoJoin`, `optimizerStillEmitsWellFormedSql`).
+- `CalciteSqlPlannerTest` — 14/14 unchanged.
+
+**No rule surprises** — the initial run-path on an aggregate+filter+join query found FILTER_INTO_JOIN pushes the filter below the Join onto the dim scan (as expected); RelToSqlConverter unparses the transformed tree cleanly. One false-alarm during testing when a test's JDBC execution failed — turned out to be the FoodMart HSQLDB fixture's quoted-lowercase table names, not an optimiser issue; test rewritten to skip JDBC round-trip (harness owns equivalence).
+
+**Files:**
+
+- `src/main/java/mondrian/calcite/CalciteSqlPlanner.java` — +~80 lines for the ruleset constant, `HepProgram` builder, and `optimize()` helper; `plan()` now calls `optimize()` before unparse.
+- `src/test/java/mondrian/calcite/CalciteSqlPlannerHepTest.java` — new (3 tests, ~190 lines).
+
+**Unlocks:** T10 (MV registration with `MaterializedViewRule` fed into the same Hep program or a downstream Volcano pass) and T11 (custom rules + cost tuning).
 
 ## Task 10 (deferred): `RelOptMaterialization` registration for FoodMart aggs
 

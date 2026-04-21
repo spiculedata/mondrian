@@ -10,9 +10,14 @@
 package mondrian.calcite;
 
 import org.apache.calcite.plan.RelOptUtil;
+import org.apache.calcite.plan.hep.HepPlanner;
+import org.apache.calcite.plan.hep.HepProgram;
+import org.apache.calcite.plan.hep.HepProgramBuilder;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.calcite.rel.rel2sql.RelToSqlConverter;
+import org.apache.calcite.rel.rules.CoreRules;
+import org.apache.calcite.plan.RelOptRule;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.sql.SqlDialect;
 import org.apache.calcite.sql.SqlNode;
@@ -45,6 +50,57 @@ public final class CalciteSqlPlanner {
      *  only overhead is a single final-boolean read per entry point. */
     private static final boolean PROFILE =
         Boolean.getBoolean("harness.calcite.profile");
+
+    /**
+     * Curated rewrite rules run through {@link HepPlanner} before unparse.
+     *
+     * <p>Feature-unlock work, not perf-chasing (Phase 3 Task 9 of
+     * {@code docs/plans/2026-04-21-calcite-sql-quality-and-grouping-sets.md}).
+     * The ruleset stays tight on purpose — every rule here must preserve
+     * row semantics AND produce nodes the JDBC {@link RelToSqlConverter}
+     * can unparse. Anything that introduces {@code EnumerableConvention}
+     * or rewrites the tree into shapes the unparser doesn't handle stays
+     * out.
+     *
+     * <p>Shipped set:
+     * <ul>
+     *   <li>{@code FILTER_INTO_JOIN} — pushes WHERE predicates into the
+     *       Join's ON clause.</li>
+     *   <li>{@code JOIN_CONDITION_PUSH} — further pushdown from the Join's
+     *       ON into its inputs when safe.</li>
+     *   <li>{@code FILTER_MERGE} — collapses adjacent Filters.</li>
+     *   <li>{@code PROJECT_MERGE} — collapses adjacent Projects.</li>
+     *   <li>{@code PROJECT_REMOVE} — drops tautological identity
+     *       Projects.</li>
+     *   <li>{@code AGGREGATE_PROJECT_MERGE} — merges an Aggregate with a
+     *       Project beneath it when column refs line up.</li>
+     * </ul>
+     *
+     * <p>Deliberately excluded: {@code EnumerableRules.*} (non-JDBC
+     * convention), join-reorder rules (T11 wants cost-tuned ordering),
+     * {@code AGGREGATE_UNION_TRANSPOSE} and similar semantics-changing
+     * rewrites.
+     */
+    private static final RelOptRule[] CURATED_RULES = {
+        CoreRules.FILTER_INTO_JOIN,
+        CoreRules.JOIN_CONDITION_PUSH,
+        CoreRules.FILTER_MERGE,
+        CoreRules.PROJECT_MERGE,
+        CoreRules.PROJECT_REMOVE,
+        CoreRules.AGGREGATE_PROJECT_MERGE,
+    };
+
+    private static HepProgram buildHepProgram() {
+        HepProgramBuilder b = new HepProgramBuilder();
+        for (RelOptRule r : CURATED_RULES) {
+            b.addRuleInstance(r);
+        }
+        return b.build();
+    }
+
+    /** Built once; {@link HepPlanner} instances are constructed per
+     *  optimise() call since HepPlanner is not thread-safe. */
+    private static final HepProgram HEP_PROGRAM = buildHepProgram();
 
     private final CalciteMondrianSchema schema;
     private final SqlDialect dialect;
@@ -99,13 +155,19 @@ public final class CalciteSqlPlanner {
     public String plan(PlannerRequest req) {
         long tPlanStart = PROFILE ? System.nanoTime() : 0L;
         RelNode rel = planRel(req);
+        long tOptStart = PROFILE ? System.nanoTime() : 0L;
+        RelNode optimized = optimize(rel);
+        if (PROFILE) {
+            CalciteProfile.record(
+                "CalciteSqlPlanner.hep", System.nanoTime() - tOptStart);
+        }
         java.util.List<String> sink = CAPTURE.get();
         if (sink != null) {
-            sink.add(normalisePlan(RelOptUtil.toString(rel)));
+            sink.add(normalisePlan(RelOptUtil.toString(optimized)));
         }
         long tUnparseStart = PROFILE ? System.nanoTime() : 0L;
         SqlNode sqlNode =
-            new RelToSqlConverter(dialect).visitRoot(rel).asStatement();
+            new RelToSqlConverter(dialect).visitRoot(optimized).asStatement();
         String out = sqlNode.toSqlString(dialect).getSql();
         if (PROFILE) {
             long now = System.nanoTime();
@@ -115,6 +177,33 @@ public final class CalciteSqlPlanner {
                 "CalciteSqlPlanner.plan.total", now - tPlanStart);
         }
         return out;
+    }
+
+    /**
+     * Run the curated {@link HepPlanner} program over {@code raw}.
+     *
+     * <p>A fresh {@link HepPlanner} is constructed per call — HepPlanner
+     * instances hold mutable state (rule-match queue, DAG) and are not
+     * safe to reuse across threads. The shared {@link HepProgram} is
+     * immutable and cheap.
+     *
+     * <p>Returns {@code raw} unchanged if Hep fails to register / run.
+     * Failure here should never happen given the rule set is JDBC-safe
+     * by construction; the belt-and-braces fallback is only here so a
+     * future rule surprise degrades to the pre-Phase-3 behaviour rather
+     * than breaking every query.
+     */
+    RelNode optimize(RelNode raw) {
+        try {
+            HepPlanner hep = new HepPlanner(HEP_PROGRAM);
+            hep.setRoot(raw);
+            return hep.findBestExp();
+        } catch (RuntimeException re) {
+            // Intentional: never fail plan() because of an optimiser
+            // surprise. Fall back to the unoptimised tree; the emitted
+            // SQL stays correct, just less tidy.
+            return raw;
+        }
     }
 
     /**
