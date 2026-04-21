@@ -246,8 +246,19 @@ public final class CalciteSqlPlanner {
         // Runs before planRel so the downstream Hep/Volcano stages
         // see the simpler (already-rewritten) request. Bypasses
         // Calcite's SubstitutionVisitor entirely.
+        //
+        // OFF BY DEFAULT — the matcher's shape-equivalence check has
+        // gaps that cause LEGACY_DRIFT on queries the agg tables
+        // cannot fully cover (e.g. time-fn, parallelperiod on the
+        // FoodMart corpus). Opt in with
+        // -Dmondrian.calcite.mvMatch=true when you want
+        // Calcite-side MV rewriting on pre-verified workloads.
+        // Infrastructure + tests remain in-tree so enabling is a
+        // one-property flip once the matcher is tightened.
         MvRegistry reg = mvRegistry;
-        if (reg != null && reg.size() > 0) {
+        if (reg != null && reg.size() > 0
+            && Boolean.getBoolean("mondrian.calcite.mvMatch"))
+        {
             try {
                 PlannerRequest rewritten = MvMatcher.tryRewrite(req, reg);
                 if (rewritten != req) {

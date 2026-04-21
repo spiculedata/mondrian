@@ -62,6 +62,9 @@ public class MvRuleRewriteTest {
     @BeforeClass
     public static void bootFoodMart() {
         FoodMartHsqldbBootstrap.ensureExtracted();
+        // Enable the hand-rolled MV matcher so CalciteSqlPlanner.plan()
+        // exercises the rewrite path this test is designed to capture.
+        System.setProperty("mondrian.calcite.mvMatch", "true");
         Util.PropertyList props =
             Util.parseConnectString(TestContext.getDefaultConnectString());
         props.put("UseSchemaPool", "false");
@@ -77,6 +80,7 @@ public class MvRuleRewriteTest {
             mondrianConn.close();
             mondrianConn = null;
         }
+        System.clearProperty("mondrian.calcite.mvMatch");
     }
 
     private static CalciteSqlPlanner plannerWithRegistry() {

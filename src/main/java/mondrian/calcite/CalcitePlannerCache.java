@@ -78,11 +78,25 @@ public final class CalcitePlannerCache {
         // RolapSchema (e.g. SqlStatisticsProvider's cardinality probe
         // fires before any tuple-read or segment-load). Otherwise
         // MaterializedViewRule has nothing to match against.
-        if (rolapSchema != null && planner.mvRegistry() == null) {
+        // Late-bind the registry if the first caller didn't have a
+        // RolapSchema (e.g. SqlStatisticsProvider's cardinality probe
+        // fires before any tuple-read or segment-load). Also retry if
+        // the registry was built but came out empty (the first call
+        // may have arrived before cube-loading completed). Once
+        // non-empty, we stop rebuilding.
+        if (rolapSchema != null
+            && (planner.mvRegistry() == null
+                || planner.mvRegistry().size() == 0))
+        {
             try {
-                planner.attachMvRegistry(
-                    MvRegistry.fromSchema(
-                        rolapSchema, planner.schema()));
+                MvRegistry registry =
+                    MvRegistry.fromSchema(rolapSchema, planner.schema());
+                // Only install if populated — otherwise keep probing
+                // on future calls. Non-destructive to any
+                // already-populated registry.
+                if (registry.size() > 0) {
+                    planner.attachMvRegistry(registry);
+                }
             } catch (RuntimeException re) {
                 // purely additive; ignore
             }
