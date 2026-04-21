@@ -681,6 +681,76 @@ public class MvRegistry {
         return null;
     }
 
+    /**
+     * Deduplicates shapes across MeasureGroups: when two shapes cover
+     * the same group-col set and measure set, keeps the one whose
+     * agg-table is "smaller". Tiebreakers in order:
+     * <ol>
+     *   <li>Both agg tables report a row count &gt; 0: pick the
+     *       smaller row count.</li>
+     *   <li>Only one reports &gt; 0: pick it (populated stats are
+     *       more trustworthy than unpopulated).</li>
+     *   <li>Neither reports &gt; 0: alphabetical on agg-table name,
+     *       deterministic. (Column-count fallback would require schema
+     *       introspection that isn't threaded here.)</li>
+     * </ol>
+     *
+     * <p>Per plan revision 2026-04-21: {@code PhysTable.getRowCount}
+     * exists but is only populated for tables whose stats have been
+     * probed; tables loaded without stats report 0 and fall through
+     * to the alphabetical tiebreaker — this is flagged here so the
+     * non-determinism cost is visible.
+     */
+    static List<ShapeSpec> dedupeByCoverage(
+        List<ShapeSpec> shapes,
+        java.util.function.ToIntFunction<String> rowCountOf)
+    {
+        LinkedHashMap<String, ShapeSpec> best = new LinkedHashMap<>();
+        for (ShapeSpec s : shapes) {
+            String key = coverageKey(s);
+            ShapeSpec cur = best.get(key);
+            if (cur == null || beats(s, cur, rowCountOf)) {
+                best.put(key, s);
+            }
+        }
+        return new ArrayList<>(best.values());
+    }
+
+    private static String coverageKey(ShapeSpec s) {
+        List<String> cols = new ArrayList<>(s.groups.size());
+        for (GroupCol g : s.groups) {
+            cols.add(g.table + "." + g.column);
+        }
+        Collections.sort(cols);
+        List<String> ms = new ArrayList<>(s.measures.size());
+        for (MeasureRef m : s.measures) {
+            ms.add(m.aggColumn + ":" + m.fn);
+        }
+        Collections.sort(ms);
+        return String.join(",", cols) + "|" + String.join(",", ms);
+    }
+
+    private static boolean beats(
+        ShapeSpec candidate, ShapeSpec incumbent,
+        java.util.function.ToIntFunction<String> rowCountOf)
+    {
+        int rc = rowCountOf.applyAsInt(candidate.aggTable);
+        int ri = rowCountOf.applyAsInt(incumbent.aggTable);
+        if (rc > 0 && ri > 0) {
+            if (rc != ri) {
+                return rc < ri;
+            }
+            return candidate.aggTable.compareTo(incumbent.aggTable) < 0;
+        }
+        if (rc > 0) {
+            return true;
+        }
+        if (ri > 0) {
+            return false;
+        }
+        return candidate.aggTable.compareTo(incumbent.aggTable) < 0;
+    }
+
     /** String form for debugging / test assertions. */
     @Override
     public String toString() {
