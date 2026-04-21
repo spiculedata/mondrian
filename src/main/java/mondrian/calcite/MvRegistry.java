@@ -73,7 +73,7 @@ import java.util.Set;
  * expressions, multi-column foreign keys, non-real columns), the entry
  * is skipped with a {@code WARN} log rather than failing the registry.
  */
-public final class MvRegistry {
+public class MvRegistry {
 
     private static final Logger LOGGER = Logger.getLogger(MvRegistry.class);
 
@@ -87,6 +87,28 @@ public final class MvRegistry {
         this.materializations =
             Collections.unmodifiableList(materializations);
         this.skippedAggs = Collections.unmodifiableList(skippedAggs);
+    }
+
+    /**
+     * Empty registry — test seam and explicit "no MVs" sentinel.
+     * Subclasses may override for stub fixtures; the canonical
+     * production constructor is {@link #fromSchema}.
+     */
+    protected MvRegistry() {
+        this(
+            Collections.<RelOptMaterialization>emptyList(),
+            Collections.<String>emptyList());
+    }
+
+    /**
+     * Test seam — construct a registry from a fixed list of
+     * pre-built materializations. Intended for exercise of the
+     * Volcano-stage fallback path with synthetic (potentially
+     * malformed) materializations; production code should always
+     * use {@link #fromSchema}.
+     */
+    protected MvRegistry(List<RelOptMaterialization> materializations) {
+        this(materializations, Collections.<String>emptyList());
     }
 
     /** Registered MV entries, one per successfully-built aggregate. */

@@ -9,14 +9,25 @@
 */
 package mondrian.calcite;
 
+import org.apache.calcite.plan.ConventionTraitDef;
+import org.apache.calcite.plan.RelOptMaterialization;
 import org.apache.calcite.plan.RelOptUtil;
+import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.plan.hep.HepPlanner;
 import org.apache.calcite.plan.hep.HepProgram;
 import org.apache.calcite.plan.hep.HepProgramBuilder;
+import org.apache.calcite.plan.volcano.VolcanoPlanner;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.calcite.rel.rel2sql.RelToSqlConverter;
 import org.apache.calcite.rel.rules.CoreRules;
+import org.apache.calcite.rel.rules.MaterializedViewFilterScanRule;
+import org.apache.calcite.rel.rules.materialize.MaterializedViewOnlyAggregateRule;
+import org.apache.calcite.rel.rules.materialize.MaterializedViewOnlyFilterRule;
+import org.apache.calcite.rel.rules.materialize.MaterializedViewOnlyJoinRule;
+import org.apache.calcite.rel.rules.materialize.MaterializedViewProjectAggregateRule;
+import org.apache.calcite.rel.rules.materialize.MaterializedViewProjectFilterRule;
+import org.apache.calcite.rel.rules.materialize.MaterializedViewProjectJoinRule;
 import org.apache.calcite.plan.RelOptRule;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.sql.SqlDialect;
@@ -24,6 +35,8 @@ import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.tools.FrameworkConfig;
 import org.apache.calcite.tools.Frameworks;
 import org.apache.calcite.tools.RelBuilder;
+
+import org.apache.log4j.Logger;
 
 import mondrian.olap.Exp;
 import mondrian.olap.Member;
@@ -44,12 +57,57 @@ import java.util.Map;
  */
 public final class CalciteSqlPlanner {
 
+    private static final Logger LOGGER =
+        Logger.getLogger(CalciteSqlPlanner.class);
+
     /** Opt-in profiling switch ({@code -Dharness.calcite.profile=true}).
      *  When enabled each phase of {@link #plan} / {@link #planRel} records
      *  elapsed nanos under {@link CalciteProfile}. Off by default — the
      *  only overhead is a single final-boolean read per entry point. */
     private static final boolean PROFILE =
         Boolean.getBoolean("harness.calcite.profile");
+
+    /**
+     * Kill switch for the {@link VolcanoPlanner} stage. Default
+     * {@code true} — the stage is a no-op when no MV registry is
+     * attached, so enabling it globally is safe. Set
+     * {@code -Dmondrian.calcite.volcano=false} to fall back to the
+     * pre-Phase-3+ pipeline (Hep only) for a production rollback
+     * without a code change.
+     */
+    private static final boolean VOLCANO_ENABLED =
+        Boolean.parseBoolean(
+            System.getProperty("mondrian.calcite.volcano", "true"));
+
+    /**
+     * Curated rule set for the {@link VolcanoPlanner} stage.
+     *
+     * <p>Limited to the {@code MaterializedView*} family plus
+     * {@link MaterializedViewFilterScanRule}. Deliberately excludes
+     * {@code EnumerableRules.*} — the {@link RelToSqlConverter} only
+     * unparses logical/JDBC conventions, so introducing Enumerable
+     * nodes produces unparseable trees. Also excludes join-reorder
+     * rules for the same reason the Hep stage does (no stats ⇒
+     * Volcano guesses, which can pick bad plans).
+     *
+     * <p>The {@code MaterializedViewProject*} rules match a
+     * {@code Project} above the target shape; the {@code
+     * MaterializedViewOnly*} rules match the bare shape. Both are
+     * registered so MV rewrites fire whether Hep left an outer
+     * Project in place or not.
+     *
+     * <p>Rule classes locked to Calcite 1.41's exports under
+     * {@code org.apache.calcite.rel.rules.materialize.*}.
+     */
+    private static final RelOptRule[] VOLCANO_RULES = {
+        MaterializedViewFilterScanRule.Config.DEFAULT.toRule(),
+        MaterializedViewProjectFilterRule.Config.DEFAULT.toRule(),
+        MaterializedViewOnlyFilterRule.Config.DEFAULT.toRule(),
+        MaterializedViewProjectJoinRule.Config.DEFAULT.toRule(),
+        MaterializedViewOnlyJoinRule.Config.DEFAULT.toRule(),
+        MaterializedViewProjectAggregateRule.Config.DEFAULT.toRule(),
+        MaterializedViewOnlyAggregateRule.Config.DEFAULT.toRule(),
+    };
 
     /**
      * Curated rewrite rules run through {@link HepPlanner} before unparse.
@@ -120,12 +178,18 @@ public final class CalciteSqlPlanner {
     }
 
     /**
-     * Attach an {@link MvRegistry} to this planner. Additive — the
-     * registry is stored as data for future cost-based planning but
-     * is <em>not</em> currently consulted by the HepPlanner program
-     * (HepPlanner is fixpoint-driven; materialization rewrites
-     * require a cost-based Volcano stage). See
-     * {@link MvRegistry} class Javadoc.
+     * Attach an {@link MvRegistry} to this planner. When non-empty,
+     * its materializations are registered on each {@code plan()} call's
+     * {@link VolcanoPlanner} stage so the {@code MaterializedView*}
+     * rule family can rewrite matching queries onto the declared agg
+     * table. The Hep stage is unchanged.
+     *
+     * <p>Attaching an empty or null registry is a no-op — the Volcano
+     * stage short-circuits and the emitted SQL matches the Hep output.
+     *
+     * <p>The Volcano stage is kill-switched via
+     * {@code -Dmondrian.calcite.volcano=false}, which makes this
+     * attach a no-op regardless of the registry's contents.
      */
     public void attachMvRegistry(MvRegistry registry) {
         this.mvRegistry = registry;
@@ -179,6 +243,17 @@ public final class CalciteSqlPlanner {
             CalciteProfile.record(
                 "CalciteSqlPlanner.hep", System.nanoTime() - tOptStart);
         }
+        // Phase 3+ Volcano stage: MV rewrites when a registry is
+        // attached. Graceful: on any failure, fall back to the Hep
+        // output. On no-op conditions (kill switch off, empty
+        // registry) returns the input untouched.
+        long tVolcanoStart = PROFILE ? System.nanoTime() : 0L;
+        optimized = runVolcano(optimized);
+        if (PROFILE) {
+            CalciteProfile.record(
+                "CalciteSqlPlanner.volcano",
+                System.nanoTime() - tVolcanoStart);
+        }
         java.util.List<String> sink = CAPTURE.get();
         if (sink != null) {
             sink.add(normalisePlan(RelOptUtil.toString(optimized)));
@@ -222,6 +297,104 @@ public final class CalciteSqlPlanner {
             // SQL stays correct, just less tidy.
             return raw;
         }
+    }
+
+    /**
+     * Cost-based {@link VolcanoPlanner} stage run after Hep.
+     *
+     * <p>Primary job: feed the attached {@link MvRegistry}'s
+     * materializations to Calcite's {@code MaterializedView*} rule
+     * family so queries that match a declared aggregate
+     * {@code MeasureGroup} can rewrite to scan the agg table
+     * directly. This is Task U's original design goal — HepPlanner
+     * is fixpoint-driven and cannot pick between alternatives on
+     * cost, so the MV rule only fires meaningfully inside a
+     * cost-based stage.
+     *
+     * <p>Guardrails:
+     * <ul>
+     *   <li>No-op when the kill switch
+     *       ({@code -Dmondrian.calcite.volcano=false}) is set,
+     *       when no MV registry is attached, or when the registry
+     *       is empty. In those cases the method returns
+     *       {@code input} unchanged with no planner construction.</li>
+     *   <li>Only logical / transformation rules are registered —
+     *       {@code EnumerableRules.*} are excluded because the
+     *       subsequent {@link RelToSqlConverter} only unparses
+     *       logical / JDBC conventions.</li>
+     *   <li>Any {@link RuntimeException} from {@code findBestExp}
+     *       is caught and logged; the method returns {@code input}
+     *       (the Hep output) so plan() never fails due to a
+     *       Volcano surprise. This is the belt-and-braces fallback
+     *       called out in the Y.4 plan — if a rule mis-configures
+     *       traits or the MV rule rejects the shape of our
+     *       defining query, we degrade to the pre-Phase-3+ output
+     *       rather than breaking 44 queries to enable MV on 4.</li>
+     * </ul>
+     *
+     * <p><b>Caveat on trait wiring.</b> The {@code RelBuilder}
+     * output is in {@link org.apache.calcite.plan.Convention#NONE},
+     * and we preserve that trait set through the Volcano stage —
+     * {@code RelToSqlConverter} is happy to unparse the
+     * {@code Convention.NONE} logical tree. No explicit conversion
+     * rules are added; if a registered MV rule fires, it produces
+     * logical-convention nodes (TableScan / Project over the agg
+     * table) that the unparser handles natively.
+     */
+    RelNode runVolcano(RelNode input) {
+        if (!VOLCANO_ENABLED) {
+            return input;
+        }
+        MvRegistry reg = mvRegistry;
+        if (reg == null || reg.size() == 0) {
+            return input;
+        }
+        try {
+            VolcanoPlanner planner = new VolcanoPlanner();
+            planner.addRelTraitDef(ConventionTraitDef.INSTANCE);
+            // Core abstract-relational equivalences; safe w.r.t.
+            // JDBC unparse (no Enumerable conversion).
+            planner.registerAbstractRelationalRules();
+            for (RelOptRule r : VOLCANO_RULES) {
+                planner.addRule(r);
+            }
+            for (RelOptMaterialization mv : reg.materializations()) {
+                planner.addMaterialization(mv);
+            }
+            // Preserve the input's trait set: RelBuilder output is
+            // Convention.NONE, which is exactly what RelToSqlConverter
+            // consumes. Requesting a different convention would need
+            // explicit converter rules we don't want in this stage.
+            RelTraitSet target = input.getTraitSet();
+            RelNode rooted = planner.changeTraits(input, target);
+            planner.setRoot(rooted);
+            return planner.findBestExp();
+        } catch (RuntimeException ex) {
+            return handleVolcanoFailure(input, ex);
+        } catch (Error ex) {
+            // Calcite's internal invariants (trait consistency,
+            // cross-cluster checks) use bare AssertionError rather
+            // than a RuntimeException. Treat them the same way —
+            // degrade to Hep output rather than surface the assert.
+            if (ex instanceof AssertionError
+                || ex instanceof StackOverflowError)
+            {
+                return handleVolcanoFailure(input, ex);
+            }
+            throw ex;
+        }
+    }
+
+    private RelNode handleVolcanoFailure(RelNode input, Throwable ex) {
+        if (LOGGER.isDebugEnabled()) {
+            LOGGER.debug(
+                "VolcanoPlanner failed; falling back to Hep output", ex);
+        } else {
+            LOGGER.warn(
+                "VolcanoPlanner failed (" + ex.getClass().getSimpleName()
+                + "); falling back to Hep output: " + ex.getMessage());
+        }
+        return input;
     }
 
     /**
