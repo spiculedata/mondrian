@@ -68,6 +68,59 @@ public class GroupingSetBatchProbeTest {
         "agg-distinct-count-customers-levels",
         "non-empty-rows");
 
+    /**
+     * Cohort-density extension — 4 MDX queries engineered to make
+     * {@code CompositeBatch}/{@code GroupingSetsCollector} accrete
+     * multiple group-by shapes that share fact+filters+measures. See the
+     * extended probe report for rationale.
+     */
+    private static final List<NamedMdx> COHORT_PROBE_QUERIES = Arrays.asList(
+        new NamedMdx(
+            "cohort-time-drilldown",
+            // Year + Quarter + Month unioned on rows — three levels of
+            // the same Time hierarchy in one shot. CrossJoin across
+            // levels of one hierarchy is illegal, so we Hierarchize the
+            // union (the `CompositeBatch` primitive still sees three
+            // batches that share fact/where/measures).
+            "SELECT {[Measures].[Unit Sales]} ON 0,\n"
+            + "  Hierarchize({\n"
+            + "    [Time].[Year].Members,\n"
+            + "    [Time].[Quarter].Members,\n"
+            + "    Descendants([Time].[1997], [Time].[Month])\n"
+            + "  }) ON 1\n"
+            + "FROM Sales"),
+
+        new NamedMdx(
+            "cohort-multi-measure",
+            // Three measures on same axis — sum/sum/sum against same fact.
+            "SELECT {[Measures].[Unit Sales], "
+            + "[Measures].[Store Sales], "
+            + "[Measures].[Store Cost]} ON 0,\n"
+            + "  [Product].[Product Family].Members ON 1\n"
+            + "FROM Sales"),
+
+        new NamedMdx(
+            "cohort-agg-friendly",
+            // Year x Store Country x Gender — agg-table friendly shape.
+            "SELECT {[Measures].[Unit Sales]} ON 0,\n"
+            + "  CrossJoin(\n"
+            + "    [Time].[Year].Members,\n"
+            + "    CrossJoin([Store].[Store Country].Members, "
+            + "[Gender].Members)\n"
+            + "  ) ON 1\n"
+            + "FROM Sales"),
+
+        new NamedMdx(
+            "cohort-hierarchical-sum",
+            // Three levels of Product dimension hierarchised on rows.
+            "SELECT {[Measures].[Unit Sales]} ON 0,\n"
+            + "  Hierarchize({\n"
+            + "    [Product].[Product Family].Members,\n"
+            + "    [Product].[Product Department].Members,\n"
+            + "    [Product].[Product Category].Members\n"
+            + "  }) ON 1\n"
+            + "FROM Sales"));
+
     @Test
     public void probe() throws Exception {
         if (!Boolean.getBoolean(RUN_PROP)) {
@@ -89,8 +142,9 @@ public class GroupingSetBatchProbeTest {
 
         Map<String, NamedMdx> corpus = loadCorpus();
 
+        // ---- original Task-5 corpus, default toggles ---------------------
         System.out.println(
-            "[probe] --- per-MDX segment-load classification ---");
+            "[probe] --- per-MDX segment-load classification (T5 corpus) ---");
         System.out.printf(
             "[probe] %-42s %6s %8s %10s %12s %10s%n",
             "mdx", "total", "segload", "cohorts", "post-batch", "gSetSQL");
@@ -123,6 +177,105 @@ public class GroupingSetBatchProbeTest {
                 System.out.printf(
                     "[probe]     n=%d  %s%n", e.getValue(), e.getKey());
             }
+        }
+
+        // ---- cohort-density extension: engineered-to-cohort queries ------
+        runCohortExtension();
+    }
+
+    /**
+     * Runs {@link #COHORT_PROBE_QUERIES} twice: Pass A with default
+     * properties, Pass B with
+     * {@code UseAggregates=true, ReadAggregates=true,
+     * EnableGroupingSets=true}. Prints a per-MDX x pass table plus the
+     * distinct group-by-set list inside each cohort.
+     */
+    private void runCohortExtension() {
+        System.out.println(
+            "[probe] ================================================");
+        System.out.println(
+            "[probe] Cohort-density extension (4 engineered MDX)");
+        System.out.println(
+            "[probe] ================================================");
+
+        MondrianProperties p = MondrianProperties.instance();
+        boolean prevUse = p.UseAggregates.get();
+        boolean prevRead = p.ReadAggregates.get();
+        boolean prevEgs = p.EnableGroupingSets.get();
+
+        List<PerMdx> passA = new ArrayList<>();
+        List<PerMdx> passB = new ArrayList<>();
+
+        try {
+            // Pass A: defaults
+            p.UseAggregates.set(false);
+            p.ReadAggregates.set(false);
+            p.EnableGroupingSets.set(false);
+            System.out.println(
+                "[probe] --- Pass A (UseAggregates=false, "
+                + "EnableGroupingSets=false) ---");
+            printHeader();
+            for (NamedMdx q : COHORT_PROBE_QUERIES) {
+                PerMdx row = runOne(q);
+                passA.add(row);
+                printRow(row);
+            }
+
+            // Pass B: UseAggregates + ReadAggregates + EnableGroupingSets
+            p.UseAggregates.set(true);
+            p.ReadAggregates.set(true);
+            p.EnableGroupingSets.set(true);
+            System.out.println(
+                "[probe] --- Pass B (UseAggregates=true, "
+                + "ReadAggregates=true, EnableGroupingSets=true) ---");
+            printHeader();
+            for (NamedMdx q : COHORT_PROBE_QUERIES) {
+                PerMdx row = runOne(q);
+                passB.add(row);
+                printRow(row);
+            }
+        } finally {
+            p.UseAggregates.set(prevUse);
+            p.ReadAggregates.set(prevRead);
+            p.EnableGroupingSets.set(prevEgs);
+        }
+
+        dumpCohorts("Pass A", passA);
+        dumpCohorts("Pass B", passB);
+    }
+
+    private static void printHeader() {
+        System.out.printf(
+            "[probe] %-32s %6s %8s %10s %12s %10s %12s%n",
+            "mdx", "total", "segload", "cohorts", "post-batch",
+            "gSetSQL", "distGrpSets");
+    }
+
+    private static void printRow(PerMdx row) {
+        System.out.printf(
+            "[probe] %-32s %6d %8d %10d %12d %10d %12d%n",
+            row.mdxName,
+            row.totalStmts,
+            row.segmentLoadStmts,
+            row.cohortCount,
+            row.postBatchStmtEstimate,
+            row.containsGroupingSetsLiteral,
+            row.distinctGroupBySets);
+    }
+
+    private static void dumpCohorts(String label, List<PerMdx> rows) {
+        System.out.println("[probe] --- " + label + " cohort breakdown ---");
+        for (PerMdx row : rows) {
+            System.out.println("[probe] " + row.mdxName);
+            for (Map.Entry<String, Integer> e : row.cohortToMembers
+                .entrySet())
+            {
+                System.out.printf(
+                    "[probe]     n=%d  %s%n", e.getValue(), e.getKey());
+            }
+            System.out.println(
+                "[probe]     distinct group-by sets across cohorts: "
+                + row.distinctGroupBySets);
         }
     }
 
@@ -165,6 +318,7 @@ public class GroupingSetBatchProbeTest {
         // list — i.e., they could be batched into a single
         // `GROUP BY GROUPING SETS (...)` statement.
         Map<String, Integer> cohort = new TreeMap<>();
+        java.util.Set<String> groupBySets = new java.util.HashSet<>();
         for (CapturedExecution ex : run.executions) {
             String sql = ex.sql;
             if (!looksLikeSegmentLoad(sql)) {
@@ -176,8 +330,10 @@ public class GroupingSetBatchProbeTest {
             }
             String key = cohortKey(sql);
             cohort.merge(key, 1, Integer::sum);
+            groupBySets.add(groupBySignature(sql));
         }
         out.cohortToMembers = cohort;
+        out.distinctGroupBySets = groupBySets.size();
         // A cohort contributes one post-batch SQL regardless of size.
         out.cohortCount = cohort.size();
         // Post-batch estimate: non-segment-load stmts remain as-is, plus
@@ -266,6 +422,30 @@ public class GroupingSetBatchProbeTest {
         return String.join(" AND ", parts);
     }
 
+    /**
+     * Returns a normalised signature for the GROUP BY clause of a
+     * segment-load SQL. Two segment loads with the same cohort key but
+     * *different* group-by signatures would be batchable into one
+     * {@code GROUP BY GROUPING SETS (...)} statement.
+     */
+    private static String groupBySignature(String sql) {
+        Matcher m = SELECT_FROM_PAT.matcher(sql.trim());
+        if (!m.matches()) {
+            return "UNPARSED::" + hash(sql);
+        }
+        String groupBy = m.group(4);
+        if (groupBy == null) {
+            return "<none>";
+        }
+        List<String> cols =
+            new ArrayList<>(Arrays.asList(groupBy.toLowerCase().split(",")));
+        for (int i = 0; i < cols.size(); i++) {
+            cols.set(i, cols.get(i).trim());
+        }
+        java.util.Collections.sort(cols);
+        return String.join(",", cols);
+    }
+
     private static String hash(String s) {
         return Integer.toHexString(s.hashCode());
     }
@@ -277,6 +457,7 @@ public class GroupingSetBatchProbeTest {
         int cohortCount;
         int postBatchStmtEstimate;
         int containsGroupingSetsLiteral;
+        int distinctGroupBySets;
         Map<String, Integer> cohortToMembers;
     }
 }

@@ -265,3 +265,162 @@ is the reference.
     `CalcitePlannerAdapters.java:1701`. That confirms Task 7 is
     blocking: we cannot turn on the gate for the Calcite backend
     until the translator learns to handle the multi-member input.
+
+## 7. Cohort-density extension (re-probe with engineered MDX)
+
+Follow-up to §3.3. The Task-5 corpus produced 0 cohorts with n>1 and
+so gave no signal on the realistic statement-reduction ceiling. This
+section adds four MDX queries that are *engineered* to make
+`CompositeBatch`/`GroupingSetsCollector` accrete the same
+fact/where/measures at multiple group-by shapes:
+
+  1. `cohort-time-drilldown` — `Hierarchize({Year.Members,
+     Quarter.Members, Descendants([Time].[1997], [Time].[Month])})`.
+     Three levels of the Time hierarchy unioned on rows.
+  2. `cohort-multi-measure` — `[Product].[Product Family].Members` x
+     `{Unit Sales, Store Sales, Store Cost}`. Three SUM measures off
+     the same fact.
+  3. `cohort-agg-friendly` — `Year x Store Country x Gender`. Expected
+     to resolve to an agg table under `UseAggregates=true`.
+  4. `cohort-hierarchical-sum` — `Hierarchize({Product Family,
+     Product Department, Product Category}.Members)` — three levels of
+     one dimension.
+
+Each query was run twice inside
+`GroupingSetBatchProbeTest.runCohortExtension`:
+
+  * **Pass A** — default toggles (`UseAggregates=false`,
+    `EnableGroupingSets=false`). Mirrors the Task-5 reference config.
+  * **Pass B** — `UseAggregates=true`, `ReadAggregates=true`,
+    `EnableGroupingSets=true` for the probe iteration, restored in
+    `finally`.
+
+`gSetSQL` is the count of emitted statements containing `GROUPING SETS`
+/ `GROUPING(`. `distGrpSets` is the count of *distinct* normalised
+group-by column signatures across segment loads — an upper bound on
+the number of group-by sets a single `GROUP BY GROUPING SETS (...)`
+could replace.
+
+### 7.1 Results table
+
+Backend: HSQLDB FoodMart (`EnableGroupingSets` honoured only where the
+dialect advertises support — HSQLDB does not).
+
+**Pass A (defaults):**
+
+| MDX                         | total | segload | cohorts | post-batch | gSetSQL | distGrpSets |
+|-----------------------------|------:|--------:|--------:|-----------:|--------:|------------:|
+| cohort-time-drilldown       |     9 |       3 |       2 |          8 |       0 |           3 |
+| cohort-multi-measure        |     4 |       1 |       1 |          4 |       0 |           1 |
+| cohort-agg-friendly         |     7 |       2 |       1 |          6 |       0 |           2 |
+| cohort-hierarchical-sum     |    10 |       3 |       1 |          8 |       0 |           3 |
+
+**Pass B (`UseAggregates=true`, `ReadAggregates=true`,
+`EnableGroupingSets=true`):**
+
+| MDX                         | total | segload | cohorts | post-batch | gSetSQL | distGrpSets |
+|-----------------------------|------:|--------:|--------:|-----------:|--------:|------------:|
+| cohort-time-drilldown       |     9 |       3 |       2 |          8 |       0 |           3 |
+| cohort-multi-measure        |     4 |       1 |       1 |          4 |       0 |           1 |
+| cohort-agg-friendly         |     7 |       2 |       1 |          6 |       0 |           2 |
+| cohort-hierarchical-sum     |    10 |       3 |       1 |          8 |       0 |           3 |
+
+Cohort breakdowns confirm the reshape: Pass A sees `sales_fact_1997`;
+Pass B resolves the agg-friendly query to `agg_c_14_sales_fact_1997`
+and the other three to `agg_g_ms_pcat_sales_fact_1997`. **Segment-load
+count, cohort count, and distinct group-by signatures are identical
+across Pass A and Pass B.** The only difference is the underlying
+table.
+
+### 7.2 Key findings vs. Task 5
+
+1. **The engineered corpus *does* produce real cohorts.** Three of
+   four queries have at least one cohort with n>=2 (time-drilldown
+   n=2, agg-friendly n=2, hierarchical-sum **n=3**). Multi-measure
+   queries collapse into one cohort with n=1 because Mondrian already
+   emits a single segment load with three SUM columns — no batching
+   opportunity exists.
+2. **Pass B emits zero `GROUPING SETS` SQL.** The toggle was set to
+   `true`, but `JdbcDialectImpl.supportsGroupingSets()` returns false
+   for HSQLDB (inherited), so `shouldUseGroupingFunction()` in
+   `FastBatchingCellReader` stays false and the
+   `GroupingSetsCollector` is installed with `useGroupingSets=false`.
+   This is the same gate described in §2 and confirms Task-6's
+   dialect-override prerequisite is non-negotiable to observe any
+   real batching, regardless of how cohort-dense the MDX is.
+3. **The upper-bound statement saving is modest even on this
+   engineered corpus.** Collapsing every cohort with n>=2 into one
+   `GROUPING SETS` statement saves:
+
+   | MDX                     | segload | post-batch | saving | % of total |
+   |-------------------------|--------:|-----------:|-------:|-----------:|
+   | cohort-time-drilldown   |       3 |          2 |      1 |      11.1% |
+   | cohort-multi-measure    |       1 |          1 |      0 |       0.0% |
+   | cohort-agg-friendly     |       2 |          1 |      1 |      14.3% |
+   | cohort-hierarchical-sum |       3 |          1 |      2 |      20.0% |
+   | **total**               |       9 |          5 |      4 |    **13.3%** |
+
+   The aggregate saving across the 4 engineered queries is
+   **4 of 30 statements = 13.3%** — below the 20% threshold set in
+   the brief. Only `cohort-hierarchical-sum` hits 20% individually;
+   the rest are single-digit-percent.
+4. **The 13.3% is an upper bound, not an expected steady state.** The
+   queries were hand-picked to maximise cohort density. Real-world
+   MDX (ad-hoc pivot clicks, saved-report templates) rarely unions
+   three levels of a hierarchy in one axis.
+
+### 7.3 Decision — pivot Phase 2 to per-statement overhead reduction
+
+**Recommendation: pivot.**
+
+Rationale (one paragraph): Even on MDX hand-engineered to defeat the
+original corpus's unfavourable cohort density, the maximum achievable
+statement reduction is 13.3% across the 4-query set and 20% only on
+the single most favourable query. The bigger blocker is structural:
+the batching gate is governed by a *dialect* flag that HSQLDB,
+Postgres, and MySQL all return `false` for; turning on Phase 2 Tasks
+6-7 as planned means (a) adding dialect-side overrides for each
+production dialect, (b) rewriting the Calcite translator's
+`fromSegmentLoad` to emit `GROUP BY GROUPING SETS (...)` with a
+column ordering that matches `SegmentLoader.processData`, (c)
+re-calibrating every test that pins segment-load SQL shape. That is a
+multi-week investment for <=13% statement reduction on
+engineered-to-cohort MDX. In contrast, Y.3's EXPLAIN ANALYSE showed
+that the residual D/B >1.10× gap on Postgres is per-statement Java
+overhead — `RelBuilder` construction, `RelNode`->SQL unparsing,
+Calcite validator invocation — paid on *every* statement, cohort or
+not. Pivoting Phase 2 to (a) cache the entire `RelNode` tree per
+`PlannerRequest` shape, (b) cache the unparsed SQL string per
+`PlannerRequest` structural hash, (c) bypass `RelBuilder` for trivial
+requests (single-table SUM, no joins) targets the same per-statement
+cost directly, applies across all dialects, and does not block on a
+translator rewrite.
+
+### 7.4 Next-task outline (supersedes §5)
+
+**Phase 2 Task 6 (revised) — `PlannerRequest`-keyed plan cache**
+
+  1. Hash the `PlannerRequest` structure (fact table, measure list,
+     group-by columns, WHERE predicate shape) into a stable
+     `RequestShape` key.
+  2. Populate a process-wide cache keyed on `(JDBC identity,
+     RequestShape)` holding the unparsed SQL string.
+  3. Cache hit -> skip `RelBuilder` entirely; emit the cached SQL
+     with the request's literal values spliced back in.
+  4. Miss -> current code path, insert into cache on success.
+  5. Measure D/B on the same Y.3 Postgres corpus; target is closing
+     the >1.10× residual.
+
+**Phase 2 Task 7 (revised) — `RelBuilder` bypass for trivial shapes**
+
+  1. Detect the trivial request shape (single fact, zero joins, one
+     GROUP BY, SUM-only measures) inside `fromSegmentLoad`.
+  2. String-build the SQL directly (we already know the template).
+  3. Verify parity against the `RelBuilder` output under the
+     equivalence harness.
+  4. Fall back to `RelBuilder` for any non-trivial shape.
+
+The multi-grouping-set translator work (original Task 7) is
+**shelved** as blocked on unresolved dialect support and insufficient
+payoff. The `UnsupportedTranslation` guard at
+`CalcitePlannerAdapters.java:1701` remains in place.
