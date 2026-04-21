@@ -48,10 +48,6 @@ public final class CalciteSqlPlanner {
 
     private final CalciteMondrianSchema schema;
     private final SqlDialect dialect;
-    /** Stable per-planner salt used by {@link CalciteSqlTemplateCache}
-     *  so shape-identical requests rendered through different dialects
-     *  cache separately. Derived from dialect identity + schema name. */
-    private final long cacheSalt;
 
     public CalciteSqlPlanner(
         CalciteMondrianSchema schema, SqlDialect dialect)
@@ -64,14 +60,6 @@ public final class CalciteSqlPlanner {
         }
         this.schema = schema;
         this.dialect = dialect;
-        // Use identityHashCode over the dialect instance — dialects are
-        // typically shared singletons per planner, so equal-identity →
-        // same cache namespace. Mix in the schema's identity too so
-        // different schemas (different datasources, different names)
-        // don't collide.
-        long a = System.identityHashCode(dialect);
-        long b = System.identityHashCode(schema);
-        this.cacheSalt = (a * 0x9E3779B97F4A7C15L) ^ b;
     }
 
     // ------------------------------------------------------------------
@@ -107,29 +95,8 @@ public final class CalciteSqlPlanner {
         return out;
     }
 
-    /** Render the request as a SQL string in the configured dialect.
-     *
-     *  <p>Consults {@link CalciteSqlTemplateCache} keyed by the
-     *  request's structural hash so repeated same-shape requests skip
-     *  RelBuilder + RelToSqlConverter and just render literals into a
-     *  pre-split template string. Plan-snapshot capture
-     *  ({@link #beginCapture}) disables the cache for the current
-     *  thread so the rel tree is always available to callers that
-     *  need it. */
+    /** Render the request as a SQL string in the configured dialect. */
     public String plan(PlannerRequest req) {
-        if (CAPTURE.get() != null) {
-            // Snapshot capture requires the RelNode, so bypass the cache
-            // on this thread. planUncached() will call planRel() which
-            // appends to the capture sink.
-            return planUncached(req);
-        }
-        return CalciteSqlTemplateCache.plan(
-            req, cacheSalt, this::planUncached);
-    }
-
-    /** Uncached planning path — the original RelBuilder +
-     *  RelToSqlConverter pipeline. Called by the cache on a miss. */
-    private String planUncached(PlannerRequest req) {
         long tPlanStart = PROFILE ? System.nanoTime() : 0L;
         RelNode rel = planRel(req);
         java.util.List<String> sink = CAPTURE.get();
