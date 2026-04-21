@@ -241,6 +241,34 @@ public class RolapMeasureGroup {
     }
 
     /**
+     * Returns whether this measure group represents an aggregate
+     * ({@code <MeasureGroup type='aggregate'>}) rather than a base fact
+     * table. Exposed for callers outside this package (e.g. the Calcite
+     * MV registry) that need to enumerate declared aggregates.
+     */
+    public boolean isAggregate() {
+        return aggregate;
+    }
+
+    /**
+     * Returns the measure-ref list (base-measure to agg-column mappings).
+     * Empty for base fact measure groups.
+     */
+    public List<RolapMeasureRef> getMeasureRefList() {
+        return measureRefList;
+    }
+
+    /**
+     * Returns the copy-column list (base-column to agg-column mappings
+     * induced by {@code <CopyLink>} declarations).
+     */
+    public List<Pair<RolapStar.Column, RolapSchema.PhysColumn>>
+        getCopyColumnList()
+    {
+        return copyColumnList;
+    }
+
+    /**
      * Returns the path by which a given dimension is joined to this measure
      * group.
      *
@@ -325,9 +353,9 @@ public class RolapMeasureGroup {
     /**
      * Reference to a measure defined in another measure group.
      */
-    static class RolapMeasureRef {
-        final RolapBaseCubeMeasure measure;
-        final RolapSchema.PhysColumn aggColumn;
+    public static class RolapMeasureRef {
+        public final RolapBaseCubeMeasure measure;
+        public final RolapSchema.PhysColumn aggColumn;
 
         public RolapMeasureRef(
             RolapBaseCubeMeasure measure,

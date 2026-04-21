@@ -51,15 +51,49 @@ public final class CalcitePlannerCache {
      * is the first call for a given JDBC identity.
      */
     public static CalciteSqlPlanner plannerFor(DataSource ds) {
-        Key key = Key.from(ds);
-        return CACHE.computeIfAbsent(key, k -> build(ds));
+        return plannerFor(ds, null);
     }
 
-    private static CalciteSqlPlanner build(DataSource ds) {
+    /**
+     * Returns a planner for {@code ds} and, if {@code rolapSchema} is
+     * non-null, builds and attaches an {@link MvRegistry} reflecting
+     * the schema's declared {@code <MeasureGroup type='aggregate'>}
+     * definitions.
+     *
+     * <p>The registry is built once per cache miss; a subsequent call
+     * with a different {@code rolapSchema} for the same JDBC identity
+     * does <strong>not</strong> replace the registry — we assume a
+     * given physical database serves one effective schema at a time
+     * within a JVM lifetime (which matches Mondrian's RolapSchema
+     * pool semantics).
+     */
+    public static CalciteSqlPlanner plannerFor(
+        DataSource ds,
+        mondrian.rolap.RolapSchema rolapSchema)
+    {
+        Key key = Key.from(ds);
+        return CACHE.computeIfAbsent(
+            key, k -> build(ds, rolapSchema));
+    }
+
+    private static CalciteSqlPlanner build(
+        DataSource ds,
+        mondrian.rolap.RolapSchema rolapSchema)
+    {
         CalciteMondrianSchema schema =
             new CalciteMondrianSchema(ds, "mondrian");
-        return new CalciteSqlPlanner(
+        CalciteSqlPlanner planner = new CalciteSqlPlanner(
             schema, CalciteDialectMap.forDataSource(ds));
+        if (rolapSchema != null) {
+            try {
+                planner.attachMvRegistry(
+                    MvRegistry.fromSchema(rolapSchema, schema));
+            } catch (RuntimeException re) {
+                // MV registry is purely additive — never fail planner
+                // construction because of an MV build surprise.
+            }
+        }
+        return planner;
     }
 
     /** Test seam: drop every cached planner. */

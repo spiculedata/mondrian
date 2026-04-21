@@ -104,6 +104,7 @@ public final class CalciteSqlPlanner {
 
     private final CalciteMondrianSchema schema;
     private final SqlDialect dialect;
+    private volatile MvRegistry mvRegistry;
 
     public CalciteSqlPlanner(
         CalciteMondrianSchema schema, SqlDialect dialect)
@@ -116,6 +117,23 @@ public final class CalciteSqlPlanner {
         }
         this.schema = schema;
         this.dialect = dialect;
+    }
+
+    /**
+     * Attach an {@link MvRegistry} to this planner. Additive — the
+     * registry is stored as data for future cost-based planning but
+     * is <em>not</em> currently consulted by the HepPlanner program
+     * (HepPlanner is fixpoint-driven; materialization rewrites
+     * require a cost-based Volcano stage). See
+     * {@link MvRegistry} class Javadoc.
+     */
+    public void attachMvRegistry(MvRegistry registry) {
+        this.mvRegistry = registry;
+    }
+
+    /** @return the attached MV registry, or {@code null} if none. */
+    public MvRegistry mvRegistry() {
+        return mvRegistry;
     }
 
     // ------------------------------------------------------------------
