@@ -107,8 +107,13 @@ public class MvRuleRewriteTest {
                 "m0"))
             .build();
         String sql = plannerWithRegistry().plan(req);
+        System.out.println("yearCountry SQL:\n" + sql);
         assertNotNull("plan() returned null", sql);
         assertTrue("plan() returned empty SQL", sql.length() > 0);
+        assertTrue(
+            "yearCountry should rewrite onto agg_c_14_sales_fact_1997; got: "
+                + sql,
+            sql.contains("agg_c_14_sales_fact_1997"));
     }
 
     /** MvHit #3 — the_year × quarter × store_country. */
@@ -132,8 +137,13 @@ public class MvRuleRewriteTest {
                 "m0"))
             .build();
         String sql = plannerWithRegistry().plan(req);
+        System.out.println("REWRITE SQL:\n" + sql);
         assertNotNull(sql);
         assertTrue(sql.length() > 0);
+        assertTrue(
+            "yearQuarterCountry should rewrite onto agg_c_14; got: "
+                + sql,
+            sql.contains("agg_c_14_sales_fact_1997"));
     }
 
     /** MvHit #1 — product_family × gender. */
@@ -158,8 +168,13 @@ public class MvRuleRewriteTest {
                 "m0"))
             .build();
         String sql = plannerWithRegistry().plan(req);
+        System.out.println("REWRITE SQL:\n" + sql);
         assertNotNull(sql);
         assertTrue(sql.length() > 0);
+        assertTrue(
+            "familyGender should rewrite onto agg_g_ms_pcat; got: "
+                + sql,
+            sql.contains("agg_g_ms_pcat_sales_fact_1997"));
     }
 
     /** MvHit #4 — product_family × gender × marital_status. */
@@ -186,8 +201,13 @@ public class MvRuleRewriteTest {
                 "m0"))
             .build();
         String sql = plannerWithRegistry().plan(req);
+        System.out.println("REWRITE SQL:\n" + sql);
         assertNotNull(sql);
         assertTrue(sql.length() > 0);
+        assertTrue(
+            "familyGenderMarital should rewrite onto agg_g_ms_pcat; got: "
+                + sql,
+            sql.contains("agg_g_ms_pcat_sales_fact_1997"));
     }
 }
 

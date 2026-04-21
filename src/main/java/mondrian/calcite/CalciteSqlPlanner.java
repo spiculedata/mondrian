@@ -349,6 +349,62 @@ public final class CalciteSqlPlanner {
         if (reg == null || reg.size() == 0) {
             return input;
         }
+        // Fast-path MV substitution: Calcite's
+        // {@link org.apache.calcite.plan.RelOptMaterializations#useMaterializedViews}
+        // returns a list of (substituted-rel, used-MVs) pairs driven by
+        // {@link org.apache.calcite.plan.SubstitutionVisitor}. When we
+        // surface PK/FK metadata via CalciteMondrianSchema, the
+        // shape-aware MvRegistry shapes unify for the MvHit corpus and
+        // Volcano's subsequent cost comparison often keeps both paths
+        // (same-order-of-magnitude rowcounts in the HSQLDB fixture
+        // leave the MV path without a decisive cost advantage). We take
+        // the first successful substitution as a definitive rewrite —
+        // the MV registry is curated by shape, so any match is a valid
+        // rewrite. Volcano then runs over the substituted tree for any
+        // further cleanup.
+        RelNode startingPoint = input;
+        boolean mvRewritten = false;
+        try {
+            // Direct SubstitutionVisitor path — skip Calcite's wrapper
+            // useMaterializedViews (which runs its own Hep program over
+            // both sides, converting Project/Filter to Calc and
+            // breaking the exact-shape match our MvRegistry was built
+            // to satisfy). Per-MV SubstitutionVisitor.go(tableRel)
+            // returns a list of substituted rels; we take the first
+            // success, which guarantees a shape-matched rewrite onto
+            // the MV's agg-table scan.
+            for (RelOptMaterialization mv : reg.materializations()) {
+                java.util.List<RelNode> subs =
+                    new org.apache.calcite.plan.SubstitutionVisitor(
+                        mv.queryRel, input)
+                        .go(mv.tableRel);
+                if (subs != null && !subs.isEmpty()) {
+                    startingPoint = subs.get(0);
+                    mvRewritten = true;
+                    break;
+                }
+            }
+        } catch (RuntimeException ex) {
+            startingPoint = input;
+        } catch (AssertionError ex) {
+            startingPoint = input;
+        }
+        // If we got a definitive shape-aware rewrite, skip the
+        // VolcanoPlanner stage — Volcano would re-explore the rewrite's
+        // children and its cost model has no decisive preference
+        // between 87k-row fact-join and 87k-row agg-scan on the HSQLDB
+        // fixture; re-entering Volcano causes it to re-pick the
+        // original tree. Running a minimal Hep cleanup is enough to
+        // tidy residual Project/Calc nodes the substitution emits.
+        if (mvRewritten) {
+            try {
+                HepPlanner hep = new HepPlanner(HEP_PROGRAM);
+                hep.setRoot(startingPoint);
+                return hep.findBestExp();
+            } catch (RuntimeException ex) {
+                return startingPoint;
+            }
+        }
         try {
             // MaterializedView rules only run when the planner's
             // context contains a CalciteConnectionConfig with
@@ -380,8 +436,16 @@ public final class CalciteSqlPlanner {
             // Convention.NONE, which is exactly what RelToSqlConverter
             // consumes. Requesting a different convention would need
             // explicit converter rules we don't want in this stage.
-            RelTraitSet target = input.getTraitSet();
-            RelNode rooted = planner.changeTraits(input, target);
+            //
+            // NOTE: {@link VolcanoPlanner#changeTraits} asserts that the
+            // requested traits differ from the current ones, so we only
+            // call it if a trait change is actually wanted. For the
+            // same-trait case (our case), setRoot directly accepts the
+            // input; Volcano registers it internally.
+            RelTraitSet target = startingPoint.getTraitSet();
+            RelNode rooted = startingPoint.getTraitSet().equals(target)
+                ? startingPoint
+                : planner.changeTraits(startingPoint, target);
             planner.setRoot(rooted);
             return planner.findBestExp();
         } catch (RuntimeException ex) {

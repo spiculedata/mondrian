@@ -454,15 +454,10 @@ public class MvRegistry {
             qb.join(JoinRelType.INNER, qb.equals(lhs, rhs));
         }
         List<RexNode> groupKeys = new ArrayList<>(s.groups.size());
-        List<String> outAliases = new ArrayList<>();
         for (GroupCol g : s.groups) {
             groupKeys.add(qb.field(g.table, g.column));
-            outAliases.add(g.column);
         }
         List<RelBuilder.AggCall> aggs = buildAggCalls(qb, s);
-        for (MeasureRef m : s.measures) {
-            outAliases.add(m.aggColumn);
-        }
         qb.aggregate(qb.groupKey(groupKeys), aggs);
         // NB: no top-Project here. The user query (post-Hep) lacks a
         // top Project, and SubstitutionVisitor's structural match
@@ -503,46 +498,33 @@ public class MvRegistry {
             RexNode rhs = tb.field(2, 1, dj.dim.column);
             tb.join(JoinRelType.INNER, tb.equals(lhs, rhs));
         }
-        if (tableJoins.isEmpty()) {
-            // Pure projection shape — no re-aggregation needed.
-            // Project agg-side columns; ordering fix-up happens below
-            // via the canonicalising tail project.
-            List<RexNode> projExprs = new ArrayList<>();
-            for (GroupCol g : s.groups) {
-                projExprs.add(tb.field(g.aggColumn));
+        // Always re-aggregate the agg scan. A pure-projection shortcut
+        // would be correct only when the user's group-by set is a
+        // unique key on the agg table — otherwise multiple agg rows
+        // map to a single user-output row and skipping re-aggregation
+        // produces duplicates and mis-summed measures. Shape-aware
+        // MVs target varying subsets of the agg's natural key, so
+        // re-aggregation is always the safe form. The agg table is
+        // still cheaper to scan than the fact table because it's
+        // summarised at a finer grain and pre-sums the measures.
+        List<RexNode> groupRefs = new ArrayList<>();
+        for (GroupCol g : s.groups) {
+            if (g.aggTable != null && g.aggColumn != null) {
+                groupRefs.add(tb.field(s.aggTable, g.aggColumn));
+            } else {
+                groupRefs.add(tb.field(g.table, g.column));
             }
-            for (MeasureRef m : s.measures) {
-                projExprs.add(tb.field(m.aggColumn));
-            }
-            tb.project(projExprs, outAliases, true);
-        } else {
-            // Re-aggregate: group by the requested GroupCols (projecting
-            // dim-side columns where needed, agg-side otherwise), sum
-            // the pre-aggregated measure columns.
-            List<RexNode> groupRefs = new ArrayList<>();
-            for (GroupCol g : s.groups) {
-                if (g.aggTable != null && g.aggColumn != null) {
-                    groupRefs.add(tb.field(s.aggTable, g.aggColumn));
-                } else {
-                    groupRefs.add(tb.field(g.table, g.column));
-                }
-            }
-            List<RelBuilder.AggCall> tAggs = new ArrayList<>();
-            for (MeasureRef m : s.measures) {
-                if ("count".equalsIgnoreCase(m.fn)) {
-                    // Fact count on the agg is pre-counted — SUM the
-                    // agg's fact_count column to preserve semantics.
-                    tAggs.add(
-                        tb.sum(tb.field(s.aggTable, m.aggColumn))
-                            .as(m.aggColumn));
-                } else {
-                    tAggs.add(
-                        tb.sum(tb.field(s.aggTable, m.aggColumn))
-                            .as(m.aggColumn));
-                }
-            }
-            tb.aggregate(tb.groupKey(groupRefs), tAggs);
         }
+        List<RelBuilder.AggCall> tAggs = new ArrayList<>();
+        for (MeasureRef m : s.measures) {
+            // count-on-agg is pre-counted; SUM of the agg's
+            // fact_count column preserves semantics, identical to the
+            // SUM(pre-summed-measure) form for SUM aggregates.
+            tAggs.add(
+                tb.sum(tb.field(s.aggTable, m.aggColumn))
+                    .as(m.aggColumn));
+        }
+        tb.aggregate(tb.groupKey(groupRefs), tAggs);
         // Align tableRel's output column ORDER to queryRel's natural
         // output order. Both sides aggregated independently and each
         // re-ordered group cols by ascending source-ordinal —

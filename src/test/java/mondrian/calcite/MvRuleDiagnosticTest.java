@@ -173,7 +173,22 @@ public class MvRuleDiagnosticTest {
 
         // --- Volcano with FoodMart MvRegistry ---
         w.println("=== Volcano stage ===");
-        RelNode afterVolcano = planner.runVolcano(hepped);
+        // Print row-count estimates we surface to Volcano — sanity
+        // check that the MV table is cheaper than the fact join.
+        w.println("rowCount(sales_fact_1997) = "
+            + cms.rowCount("sales_fact_1997"));
+        w.println("rowCount(agg_c_14_sales_fact_1997) = "
+            + cms.rowCount("agg_c_14_sales_fact_1997"));
+        w.println("rowCount(store) = " + cms.rowCount("store"));
+        w.println("rowCount(time_by_day) = " + cms.rowCount("time_by_day"));
+        RelNode afterVolcano;
+        try {
+            afterVolcano = planner.runVolcano(hepped);
+        } catch (Throwable t) {
+            w.println("runVolcano threw: " + t);
+            t.printStackTrace(w);
+            afterVolcano = hepped;
+        }
         w.println("rowType = "
             + afterVolcano.getRowType().getFullTypeString());
         w.println(RelOptUtil.toString(afterVolcano));
@@ -182,6 +197,10 @@ public class MvRuleDiagnosticTest {
         w.println("text-equal-to-hep? "
             + RelOptUtil.toString(afterVolcano)
                 .equals(RelOptUtil.toString(hepped)));
+        // Contains agg_c_14_sales_fact_1997 anywhere?
+        w.println("afterVolcano contains agg_c_14? "
+            + RelOptUtil.toString(afterVolcano)
+                .contains("agg_c_14_sales_fact_1997"));
 
         // --- Manual Volcano run with verbose trait reporting ---
         if (aggC14 != null) {
@@ -198,7 +217,9 @@ public class MvRuleDiagnosticTest {
                 }
                 vp.addMaterialization(aggC14);
                 RelTraitSet target = hepped.getTraitSet();
-                RelNode rooted = vp.changeTraits(hepped, target);
+                RelNode rooted = hepped.getTraitSet().equals(target)
+                    ? hepped
+                    : vp.changeTraits(hepped, target);
                 vp.setRoot(rooted);
                 RelNode best = vp.findBestExp();
                 w.println("focused-best rowType = "
@@ -214,13 +235,83 @@ public class MvRuleDiagnosticTest {
         }
 
         // --- Diagnosis via SubstitutionVisitor direct call ---
+        // Probe EVERY registered MV, not just the last one named
+        // agg_c_14 — multiple shapes are registered under the same name.
+        w.println();
+        w.println("=== SubstitutionVisitor direct probe (all MVs) ===");
+        int totalHits = 0;
+        int idx = 0;
+        for (RelOptMaterialization m : reg.materializations()) {
+            w.println(" -- MV["
+                + (idx++) + "] target="
+                + m.qualifiedTableName
+                + " queryRowType="
+                + m.queryRel.getRowType().getFieldCount()
+                + "cols --");
+            totalHits += probeSubstitution(m, hepped, w);
+        }
+        w.println("Total SubstitutionVisitor hits: " + totalHits);
+
+        // --- Probe table statistics on every TableScan ---
+        w.println();
+        w.println("=== Statistic probe (getKeys / getReferentialConstraints) ===");
         if (aggC14 != null) {
-            w.println();
-            w.println("=== SubstitutionVisitor direct probe ===");
-            probeSubstitution(aggC14, hepped, w);
+            w.println("MV queryRel statistics:");
+            dumpStatistics(aggC14.queryRel, w);
+            w.println("MV tableRel statistics:");
+            dumpStatistics(aggC14.tableRel, w);
+        }
+        w.println("User query (hepped) statistics:");
+        dumpStatistics(hepped, w);
+
+        w.println();
+        w.println("=== CalciteMondrianSchema constraint snapshot ===");
+        for (java.util.Map.Entry<String, java.util.List<java.util.List<String>>> e
+            : cms.primaryKeysSnapshot().entrySet())
+        {
+            w.println("  PK " + e.getKey() + " = " + e.getValue());
+        }
+        for (java.util.Map.Entry<String,
+                    java.util.List<CalciteMondrianSchema.ForeignKey>> e
+            : cms.foreignKeysSnapshot().entrySet())
+        {
+            StringBuilder sb = new StringBuilder();
+            for (CalciteMondrianSchema.ForeignKey fk : e.getValue()) {
+                if (sb.length() > 0) sb.append(", ");
+                sb.append(fk.childColumn).append(" -> ")
+                    .append(fk.parentTable).append(".")
+                    .append(fk.parentColumn);
+            }
+            w.println("  FK " + e.getKey() + " : " + sb);
         }
 
         System.out.println(buf.toString());
+
+        // Regression gate: PK/FK metadata must let at least one MV
+        // produce a non-empty substitution list. Before the PK/FK
+        // plumbing this was zero for every shape; keeping the assert
+        // surfaces any future regression (Calcite upgrade, MvRegistry
+        // shape change, schema decorator bug).
+        org.junit.Assert.assertTrue(
+            "Expected >=1 SubstitutionVisitor hit across registered MVs; "
+                + "PK/FK metadata regression likely",
+            totalHits >= 1);
+    }
+
+    /** Walk a RelNode tree and report getKeys / getReferentialConstraints
+     *  on every TableScan encountered. */
+    private static void dumpStatistics(RelNode rel, PrintWriter w) {
+        rel.accept(new org.apache.calcite.rel.RelShuttleImpl() {
+            @Override public RelNode visit(
+                org.apache.calcite.rel.core.TableScan scan)
+            {
+                org.apache.calcite.plan.RelOptTable t = scan.getTable();
+                w.println("  scan " + t.getQualifiedName()
+                    + " keys=" + t.getKeys()
+                    + " refs=" + t.getReferentialConstraints());
+                return super.visit(scan);
+            }
+        });
     }
 
     /** Reflectively grab the production VOLCANO_RULES so the
@@ -242,7 +333,7 @@ public class MvRuleDiagnosticTest {
      * inside Volcano. Captures any exception and whether a non-empty
      * substitution list came back.
      */
-    private static void probeSubstitution(
+    private static int probeSubstitution(
         RelOptMaterialization mv,
         RelNode userRel,
         PrintWriter w)
@@ -273,13 +364,17 @@ public class MvRuleDiagnosticTest {
                     w.println("  [" + (i++) + "]:");
                     w.println(RelOptUtil.toString(s));
                 }
+                return subs.size();
             }
+            return 0;
         } catch (java.lang.reflect.InvocationTargetException ite) {
             w.println("SubstitutionVisitor threw: " + ite.getCause());
             ite.getCause().printStackTrace(w);
+            return 0;
         } catch (Throwable t) {
             w.println("SubstitutionVisitor probe failed: " + t);
             t.printStackTrace(w);
+            return 0;
         }
     }
 }
