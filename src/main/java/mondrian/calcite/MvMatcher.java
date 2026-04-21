@@ -350,6 +350,20 @@ public final class MvMatcher {
         for (PlannerRequest.OrderBy ob : newOrderBy) {
             out.addOrderBy(ob);
         }
+        // If the user didn't supply explicit orderBy, force deterministic
+        // row order by sorting on the rewritten groupBy columns. Without
+        // this, Postgres/HSQLDB return agg-scan rows in a different
+        // physical order than the legacy fact-scan — harness checksum
+        // is computed over iteration order, so identical values in a
+        // different order trip LEGACY_DRIFT. Legacy works because its
+        // row order is stable under the fact-scan plan the golden was
+        // recorded against; we need the same determinism.
+        if (newOrderBy.isEmpty()) {
+            for (PlannerRequest.Column gc : newGroupBy) {
+                out.addOrderBy(new PlannerRequest.OrderBy(
+                    gc, PlannerRequest.Order.ASC));
+            }
+        }
         // Measures-only aggregation (no group-by) isn't possible with
         // the empty-builder constraint — we have measures above so
         // build() is safe.
