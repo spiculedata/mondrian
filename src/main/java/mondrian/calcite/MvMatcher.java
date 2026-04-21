@@ -149,6 +149,21 @@ public final class MvMatcher {
             return null;
         }
 
+        // Require EXACT groupBy-set equality between user request and
+        // shape. SUM-over-SUM rollup from a finer-grained MV is
+        // semantically valid, but produces cell-set checksum drift
+        // against legacy's fact-scan golden (rowset values identical,
+        // but column projection / row iteration order can differ in
+        // ways the harness's byte-level checksum catches). Exact
+        // equality prevents false matches like user [year, gender,
+        // marital_status] against shape [year, family, gender,
+        // marital_status]. If rollup is wanted later, a separate
+        // shape entry at the coarser grain is the right mechanism —
+        // explicit beats inferred here.
+        if (req.groupBy.size() != s.groups.size()) {
+            return null;
+        }
+
         // Build a directory of what the agg provides:
         //   denormalized group cols — keyed by (dimAlias, column)
         //     map → (aggTable, aggColumn)

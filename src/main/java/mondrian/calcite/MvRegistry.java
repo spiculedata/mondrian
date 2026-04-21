@@ -361,6 +361,75 @@ public class MvRegistry {
                     new GroupCol(
                         "customer", "gender",
                         aggTable, "gender"))));
+            // Shape 1-b: year × family × gender
+            // Mondrian always slices by [Time].[Year] under hasAll='false',
+            // so segment-load groupBy always prefixes the_year. Without
+            // this variant the 2-col family-gender shape never matches the
+            // runtime 3-col request.
+            out.add(new ShapeSpec(
+                "agg_g_ms_pcat::year-family-gender",
+                aggTable, factTable, measures,
+                Arrays.asList(
+                    new DimJoin(
+                        "product",
+                        new JoinCol("sales_fact_1997", "product_id"),
+                        new JoinCol("product", "product_id")),
+                    new DimJoin(
+                        "product_class",
+                        new JoinCol("product", "product_class_id"),
+                        new JoinCol("product_class", "product_class_id")),
+                    new DimJoin(
+                        "customer",
+                        new JoinCol("sales_fact_1997", "customer_id"),
+                        new JoinCol("customer", "customer_id")),
+                    new DimJoin(
+                        "time_by_day",
+                        new JoinCol("sales_fact_1997", "time_id"),
+                        new JoinCol("time_by_day", "time_id"))),
+                Arrays.asList(
+                    new GroupCol(
+                        "time_by_day", "the_year",
+                        aggTable, "the_year"),
+                    new GroupCol(
+                        "product_class", "product_family",
+                        aggTable, "product_family"),
+                    new GroupCol(
+                        "customer", "gender",
+                        aggTable, "gender"))));
+            // Shape 1-c: year × family × gender × marital_status
+            out.add(new ShapeSpec(
+                "agg_g_ms_pcat::year-family-gender-marital",
+                aggTable, factTable, measures,
+                Arrays.asList(
+                    new DimJoin(
+                        "product",
+                        new JoinCol("sales_fact_1997", "product_id"),
+                        new JoinCol("product", "product_id")),
+                    new DimJoin(
+                        "product_class",
+                        new JoinCol("product", "product_class_id"),
+                        new JoinCol("product_class", "product_class_id")),
+                    new DimJoin(
+                        "customer",
+                        new JoinCol("sales_fact_1997", "customer_id"),
+                        new JoinCol("customer", "customer_id")),
+                    new DimJoin(
+                        "time_by_day",
+                        new JoinCol("sales_fact_1997", "time_id"),
+                        new JoinCol("time_by_day", "time_id"))),
+                Arrays.asList(
+                    new GroupCol(
+                        "time_by_day", "the_year",
+                        aggTable, "the_year"),
+                    new GroupCol(
+                        "product_class", "product_family",
+                        aggTable, "product_family"),
+                    new GroupCol(
+                        "customer", "gender",
+                        aggTable, "gender"),
+                    new GroupCol(
+                        "customer", "marital_status",
+                        aggTable, "marital_status"))));
             // Shape 4: family × gender × marital_status
             out.add(new ShapeSpec(
                 "agg_g_ms_pcat::family-gender-marital",

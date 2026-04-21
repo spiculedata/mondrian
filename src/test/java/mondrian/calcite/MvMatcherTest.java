@@ -191,6 +191,127 @@ public class MvMatcherTest {
         assertSame(req, MvMatcher.tryRewrite(req, registry));
     }
 
+    /** MvHit #1 — product_family × gender. Columns live on
+     *  {@code product_class} (snowflake-chained off {@code product})
+     *  and {@code customer}, both CopyLink-denormalized on the agg.
+     *  Matcher should rewrite onto {@code agg_g_ms_pcat_sales_fact_1997}
+     *  and drop all three joins (product, product_class, customer). */
+    @Test
+    public void matchesCopyLinkShape_familyGender() {
+        PlannerRequest req = PlannerRequest.builder("sales_fact_1997")
+            .addJoin(new PlannerRequest.Join(
+                "product", "product_id", "product_id"))
+            .addJoin(PlannerRequest.Join.chained(
+                "product", "product_class_id",
+                "product_class", "product_class_id"))
+            .addJoin(new PlannerRequest.Join(
+                "customer", "customer_id", "customer_id"))
+            .addGroupBy(new PlannerRequest.Column(
+                "product_class", "product_family"))
+            .addGroupBy(new PlannerRequest.Column(
+                "customer", "gender"))
+            .addMeasure(new PlannerRequest.Measure(
+                PlannerRequest.AggFn.SUM,
+                new PlannerRequest.Column("sales_fact_1997", "unit_sales"),
+                "m0"))
+            .build();
+        PlannerRequest out = MvMatcher.tryRewrite(req, registry);
+        assertNotSame("family-gender should rewrite", req, out);
+        assertEquals(
+            "factTable should point at agg_g_ms_pcat_sales_fact_1997",
+            "agg_g_ms_pcat_sales_fact_1997",
+            out.factTable);
+        assertTrue(
+            "All dim joins CopyLinked on agg; none should be retained",
+            out.joins.isEmpty());
+        // Group-by columns are rewritten to the agg-side denorm columns.
+        for (PlannerRequest.Column gc : out.groupBy) {
+            assertEquals(
+                "groupBy column should reference the agg table",
+                "agg_g_ms_pcat_sales_fact_1997",
+                gc.table);
+        }
+        assertEquals(1, out.measures.size());
+        assertEquals(
+            "agg_g_ms_pcat_sales_fact_1997",
+            out.measures.get(0).column.table);
+        assertEquals("unit_sales", out.measures.get(0).column.name);
+    }
+
+    /** MvHit #4 — product_family × gender × marital_status. Three-col
+     *  CopyLinked group-by: product_family (product_class), gender and
+     *  marital_status (customer). All three should come off the agg. */
+    @Test
+    public void matchesCopyLinkShape_familyGenderMarital() {
+        PlannerRequest req = PlannerRequest.builder("sales_fact_1997")
+            .addJoin(new PlannerRequest.Join(
+                "product", "product_id", "product_id"))
+            .addJoin(PlannerRequest.Join.chained(
+                "product", "product_class_id",
+                "product_class", "product_class_id"))
+            .addJoin(new PlannerRequest.Join(
+                "customer", "customer_id", "customer_id"))
+            .addGroupBy(new PlannerRequest.Column(
+                "product_class", "product_family"))
+            .addGroupBy(new PlannerRequest.Column(
+                "customer", "gender"))
+            .addGroupBy(new PlannerRequest.Column(
+                "customer", "marital_status"))
+            .addMeasure(new PlannerRequest.Measure(
+                PlannerRequest.AggFn.SUM,
+                new PlannerRequest.Column("sales_fact_1997", "unit_sales"),
+                "m0"))
+            .build();
+        PlannerRequest out = MvMatcher.tryRewrite(req, registry);
+        assertNotSame(
+            "family-gender-marital should rewrite", req, out);
+        assertEquals(
+            "agg_g_ms_pcat_sales_fact_1997", out.factTable);
+        assertTrue(
+            "All dim joins CopyLinked; none retained",
+            out.joins.isEmpty());
+        assertEquals(3, out.groupBy.size());
+        for (PlannerRequest.Column gc : out.groupBy) {
+            assertEquals(
+                "agg_g_ms_pcat_sales_fact_1997", gc.table);
+        }
+    }
+
+    /** Reject when the user references a dim column that's neither
+     *  denormalized/CopyLinked on the agg nor reachable via a retained
+     *  join. {@code customer.yearly_income} is not on
+     *  {@code agg_g_ms_pcat_sales_fact_1997}, and no shape declares a
+     *  customer FK join → match must fail, request untouched. */
+    @Test
+    public void rejectWhenDimColumnNotCopyLinked() {
+        PlannerRequest req = PlannerRequest.builder("sales_fact_1997")
+            .addJoin(new PlannerRequest.Join(
+                "product", "product_id", "product_id"))
+            .addJoin(PlannerRequest.Join.chained(
+                "product", "product_class_id",
+                "product_class", "product_class_id"))
+            .addJoin(new PlannerRequest.Join(
+                "customer", "customer_id", "customer_id"))
+            .addGroupBy(new PlannerRequest.Column(
+                "product_class", "product_family"))
+            .addGroupBy(new PlannerRequest.Column(
+                "customer", "gender"))
+            // yearly_income is NOT a CopyLink column on the agg and no
+            // shape keeps the customer dim as a retained-join
+            // resolution path.
+            .addGroupBy(new PlannerRequest.Column(
+                "customer", "yearly_income"))
+            .addMeasure(new PlannerRequest.Measure(
+                PlannerRequest.AggFn.SUM,
+                new PlannerRequest.Column("sales_fact_1997", "unit_sales"),
+                "m0"))
+            .build();
+        assertSame(
+            "unresolvable dim col must block rewrite",
+            req,
+            MvMatcher.tryRewrite(req, registry));
+    }
+
     /** Empty registry is a no-op. */
     @Test
     public void emptyRegistryIsNoOp() {
