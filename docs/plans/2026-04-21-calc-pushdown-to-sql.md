@@ -10,6 +10,39 @@
 
 ---
 
+## Revision 2026-04-21 — codebase alignment
+
+The original plan was drafted from an earlier-session summary and uses placeholder class names. Real-code mapping:
+
+| Plan reference | Actual class / hook |
+|---|---|
+| `CalcClassifier` | `mondrian.calcite.ArithmeticCalcAnalyzer` |
+| `CalcPushdownRewriter.rewrite()` | `ArithmeticCalcTranslator` + `CalcPushdownRegistry` + inner/outer Project construction in `CalciteSqlPlanner.java` ~lines 680–740 |
+| `CalciteSqlEmitter` | Doesn't exist — unparse happens in-line via `RelToSqlConverter` from `CalciteSqlPlanner` |
+| `CalciteSqlPlanner.lastSql` | Use the existing `mondrian.test.calcite.SqlCapture` + `CapturedExecution` harness — see `CalcPushdownRuntimeTest` for the pattern |
+| `EquivalenceCalcTest` | Not yet created; add it or extend `EquivalenceAggregateTest` with a calc-corpus parameterised axis |
+
+**The real symptom is different from the original plan's premise.** `CalciteSqlPlanner` already emits inner (with calc) + outer (without calc) Projects using `force=true` so the inner SQL carries the arithmetic for observability — `CalcPushdownRuntimeTest` already asserts this. The outer Project *deliberately* drops the calc column so `SegmentLoader`'s output row shape matches legacy for row-checksum parity.
+
+**So Task B isn't "prevent a Hep fold" — it's "let the SQL-computed calc value actually reach the calc-member evaluator instead of being recomputed in Java."** Concretely:
+1. Mark `PlannerRequest.ComputedMeasure` as consumable (`consumeInSegmentLoad`).
+2. Teach `SegmentLoader` to read the SQL-computed column into the calc member's cell, bypassing Java arithmetic when the flag is on.
+3. Normalise SQL div-by-zero (`CASE WHEN b=0 THEN NULL` — already in `ArithmeticCalcTranslator`) vs Java empty-on-/0 so equivalence cells match.
+4. Opt-in flag `-Dmondrian.calcite.calcConsume=true` keeps row-checksum parity green by default.
+
+**Task mapping (implementer guidance):**
+- Tasks 1–2: keep the spirit (SQL capture + diagnosis) but use `SqlCapture`. Rename to "confirm SQL arithmetic lands in inner projection, trace why `SegmentLoader` still recomputes Java-side."
+- Task 3 (remove fold-inducing rules): **skip** — not the blocker.
+- Task 4 (alias boundary): **skip** — `force=true` already does it.
+- **New Task 3'**: route consumed calc through `SegmentLoader` behind `calcConsume` flag.
+- **New Task 4'**: harness cell-parity assertion on div-by-zero between SQL and Java paths.
+- Task 5 (equivalence): keep; axis becomes `calcConsume={false,true}`.
+- Task 6 (observability): `CalcitePlannerAdapters.calcPushedCount()` exists. Add `calcConsumedCount()` for "SQL value actually used."
+
+If the short-circuit diagnosis reveals a different blocker than described above, **stop and report** — don't push through. The source summary may be one revision stale.
+
+---
+
 ### Task 1: Reproduce the fold — capture before/after SQL
 
 **Files:**
