@@ -2496,39 +2496,9 @@ public final class CalcitePlannerAdapters {
         return CalcPushdownRegistry.rejectedCount();
     }
 
-    private static final java.util.concurrent.atomic.AtomicLong
-        CALC_CONSUMED_COUNT =
-            new java.util.concurrent.atomic.AtomicLong();
-
-    /** Calc-pushdown counter: incremented once per segment-load
-     *  translation that included at least one
-     *  {@link PlannerRequest.ComputedMeasure} emitted as a SQL column
-     *  under {@code -Dmondrian.calcite.calcConsume=true}. Observability
-     *  for the Task 3' path: a positive value means the SQL-side
-     *  arithmetic actually reached the JDBC query. */
-    public static long calcConsumedCount() {
-        return CALC_CONSUMED_COUNT.get();
-    }
-
-    /** Whether the calc-consume flag is currently enabled. Re-read on
-     *  every call; the flag is mutable for tests. */
-    public static boolean calcConsumeActive() {
-        return CalciteSqlPlanner.calcConsumeEnabled();
-    }
-
-    /** Bump {@link #calcConsumedCount()} by the number of calc columns
-     *  emitted in the current segment-load translation. */
-    public static void onCalcConsumed(int calcColumnCount) {
-        if (calcColumnCount <= 0) {
-            return;
-        }
-        CALC_CONSUMED_COUNT.addAndGet(calcColumnCount);
-    }
-
     /** Reset calc-pushdown counters (test-only). */
     public static void resetCalcPushdownCounters() {
         CalcPushdownRegistry.resetCounters();
-        CALC_CONSUMED_COUNT.set(0L);
     }
 
     /**

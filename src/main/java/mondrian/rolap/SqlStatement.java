@@ -450,18 +450,12 @@ public class SqlStatement implements DBStatement {
     public List<Type> guessTypes() throws SQLException {
         final ResultSetMetaData metaData = resultSet.getMetaData();
         final int columnCount = metaData.getColumnCount();
-        // Calcite's calc-consume path (see CalciteSqlPlanner#calcConsumeEnabled)
-        // may append calc columns beyond the legacy {groupBy, measures} shape
-        // the types hint was built for. Types list shorter than columnCount
-        // is acceptable: extra trailing columns are inferred from metadata.
-        assert this.types == null || this.types.size() <= columnCount
-            : "types " + types + " cardinality > column count " + columnCount;
+        assert this.types == null || this.types.size() == columnCount
+            : "types " + types + " cardinality != column count " + columnCount;
         List<Type> types = new ArrayList<Type>();
         for (int i = 0; i < columnCount; i++) {
             final Type suggestedType =
-                (this.types == null || i >= this.types.size())
-                    ? null
-                    : this.types.get(i);
+                this.types == null ? null : this.types.get(i);
             // There might not be a schema constructed yet,
             // so watch out here for NPEs.
             RolapSchema schema = locus.execution.getMondrianStatement()
