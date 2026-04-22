@@ -748,6 +748,22 @@ public class SegmentLoader {
         String sql = pair.left;
         if (MondrianBackend.current().isCalcite()) {
             String calciteSql;
+            if (CalcitePlannerAdapters.calcConsumeActive()) {
+                // Under the opt-in flag we count the calc columns that
+                // fromSegmentLoad would append to the SELECT list, so
+                // the observability counter bumps even when SQL was
+                // precomputed on the submitter thread. Rebuilding the
+                // PlannerRequest here is microseconds-cheap and the
+                // flag is opt-in.
+                PlannerRequest countReq =
+                    CalcitePlannerAdapters.fromSegmentLoad(
+                        groupingSetsList, compoundPredicateList);
+                int calcColumnCount = countReq.computedMeasures.size();
+                if (calcColumnCount > 0) {
+                    CalcitePlannerAdapters.onCalcConsumed(
+                        calcColumnCount);
+                }
+            }
             if (precomputedCalciteSql != null) {
                 // Fast path: translation was done on the submitter
                 // thread in load() — see the acquisition-site comment.
@@ -758,6 +774,16 @@ public class SegmentLoader {
                         groupingSetsList, compoundPredicateList);
                 calciteSql = plannerFor(star).plan(req);
             }
+            // Calcite may append calc columns to the legacy {groupBy,
+            // measures} shape (see calcConsumeActive). The types hint
+            // originally built by AggregationManager.generateSql covers
+            // only the legacy-shape columns; SqlStatement.guessTypes
+            // and SegmentLoader.loadData have been widened to accept a
+            // types list shorter than the resultset column count. Any
+            // trailing SQL-computed calc columns are inferred and then
+            // dropped by processData's positional read. Full cell-
+            // consumption (routing the SQL value into the evaluator
+            // cell) is future work.
             if (LOGGER.isDebugEnabled()) {
                 LOGGER.debug(
                     "Calcite backend: segment-load translated.\n"
@@ -1032,7 +1058,12 @@ public class SegmentLoader {
         int measureCount = groupingSetsList.getDefaultSegments().size();
         int groupingFunctionsCount = groupingSetsList.getRollupColumns().size();
         List<SqlStatement.Type> types = stmt.guessTypes();
-        assert arity + measureCount + groupingFunctionsCount == types.size();
+        // Under CalciteSqlPlanner's calc-consume path, Calcite may append
+        // calc columns past the legacy {groupBy, measures, groupingFns}
+        // shape. The extra trailing columns are read past the positional
+        // consumer in processData, not mapped into any segment. Allow
+        // types.size() to exceed the legacy expectation.
+        assert arity + measureCount + groupingFunctionsCount <= types.size();
 
         return stmt.getResultSet();
     }
