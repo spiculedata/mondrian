@@ -40,6 +40,17 @@
     </repository>
   </repositories>
 
+  <pluginRepositories>
+    <!-- Mirror of project-lib for plugin-scoped dep resolution (e.g. maven-antrun-plugin's
+         gen-xom-and-resgen task pulls eigenbase-xom / eigenbase-resgen as plugin classpath). -->
+    <pluginRepository>
+      <id>project-lib</id>
+      <url>file://${project.basedir}/lib/repo</url>
+      <releases><enabled>true</enabled></releases>
+      <snapshots><enabled>false</enabled></snapshots>
+    </pluginRepository>
+  </pluginRepositories>
+
   <dependencies>
     <!-- TIER 1 safe bumps (same package). TIER 2 (commons-lang/collections/pool/dbcp/math, dom4j 2.x) follow in subsequent passes. -->
     <dependency><groupId>commons-collections</groupId><artifactId>commons-collections</artifactId><version>3.2.2</version></dependency>
