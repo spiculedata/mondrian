@@ -91,7 +91,21 @@ public final class MvMatcher {
         if (!canRewrite(req)) {
             return req;
         }
-        for (MvRegistry.ShapeSpec s : shapes) {
+        // O(1) candidate narrowing by (factTable, sorted groupBy cols):
+        // collapses the old linear scan over every registered shape to
+        // the few that even have the right coverage for this request.
+        // Phase-1 catalog is small so the win is mostly structural;
+        // Phase 2's thousands-of-shapes catalog needs it for the hot
+        // path not to degrade. Fallback to the linear scan when the
+        // index isn't available (older test fixtures use the legacy
+        // MvRegistry constructors that don't build the index).
+        List<MvRegistry.ShapeSpec> candidates =
+            registry.shapesFor(req);
+        SHAPE_LOOKUPS.increment();
+        if (candidates == null) {
+            candidates = shapes;
+        }
+        for (MvRegistry.ShapeSpec s : candidates) {
             PlannerRequest rewritten = tryMatch(req, s);
             if (rewritten != null) {
                 if (TRACE) {
@@ -104,6 +118,19 @@ public final class MvMatcher {
         }
         return req;
     }
+
+    /** Monotonic counter — number of matcher-lookup invocations. */
+    public static long shapeLookupsPerProcess() {
+        return SHAPE_LOOKUPS.sum();
+    }
+
+    /** Test-only reset; exposed to unit tests that want per-test counts. */
+    static void resetCounters() {
+        SHAPE_LOOKUPS.reset();
+    }
+
+    private static final java.util.concurrent.atomic.LongAdder SHAPE_LOOKUPS =
+        new java.util.concurrent.atomic.LongAdder();
 
     /** Up-front predicates cheap to check once per request. */
     private static boolean canRewrite(PlannerRequest req) {

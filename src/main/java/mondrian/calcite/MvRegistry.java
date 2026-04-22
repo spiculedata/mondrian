@@ -76,6 +76,10 @@ public class MvRegistry {
     private final List<ShapeSpec> shapeSpecs;
     /** Calcite schema needed to build per-planner materializations. */
     private final CalciteMondrianSchema calciteSchema;
+    /** O(1) lookup index: coverage key → candidate shape specs. Null
+     *  when the registry was built from pre-packaged materializations
+     *  (legacy test fixtures). */
+    private final Map<GroupColKey, List<ShapeSpec>> shapeIndex;
 
     private MvRegistry(
         List<RelOptMaterialization> materializations,
@@ -90,6 +94,45 @@ public class MvRegistry {
             ? Collections.<ShapeSpec>emptyList()
             : Collections.unmodifiableList(shapeSpecs);
         this.calciteSchema = calciteSchema;
+        this.shapeIndex = buildShapeIndex(this.shapeSpecs);
+    }
+
+    private static Map<GroupColKey, List<ShapeSpec>> buildShapeIndex(
+        List<ShapeSpec> specs)
+    {
+        if (specs == null || specs.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        Map<GroupColKey, List<ShapeSpec>> m = new LinkedHashMap<>();
+        for (ShapeSpec s : specs) {
+            GroupColKey k = GroupColKey.forSpec(s);
+            m.computeIfAbsent(k, kk -> new ArrayList<>()).add(s);
+        }
+        return Collections.unmodifiableMap(m);
+    }
+
+    /**
+     * O(1)-ish candidate lookup for {@link MvMatcher}: narrows the
+     * per-request scan to shapes whose {@code (factTable, group-col
+     * set)} coverage exactly matches the request. Returns an empty
+     * list if nothing matches; {@code null} if this registry has no
+     * index (legacy test fixtures — caller falls back to the full
+     * shapeSpecs scan).
+     */
+    List<ShapeSpec> shapesFor(PlannerRequest req) {
+        if (shapeIndex == null || shapeIndex.isEmpty()) {
+            return null;
+        }
+        if (req.groupBy == null) {
+            return Collections.emptyList();
+        }
+        List<String> cols = new ArrayList<>(req.groupBy.size());
+        for (PlannerRequest.Column c : req.groupBy) {
+            cols.add(c.table + "." + c.name);
+        }
+        GroupColKey key = GroupColKey.forRequest(req.factTable, cols);
+        List<ShapeSpec> got = shapeIndex.get(key);
+        return got == null ? Collections.<ShapeSpec>emptyList() : got;
     }
 
     private MvRegistry(
