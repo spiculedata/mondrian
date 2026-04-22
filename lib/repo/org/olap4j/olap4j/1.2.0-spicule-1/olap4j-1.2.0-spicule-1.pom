@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.olap4j</groupId>
+    <artifactId>olap4j-parent</artifactId>
+    <version>1.2.0-spicule-1</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>olap4j</artifactId>
+  <packaging>jar</packaging>
+  <name>olap4j</name>
+  <description>Open Java API for OLAP</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.vintage</groupId>
+      <artifactId>junit-vintage-engine</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <sourceDirectory>${project.basedir}/../src</sourceDirectory>
+
+    <resources>
+      <resource>
+        <directory>${project.basedir}/../src</directory>
+        <includes>
+          <include>org/olap4j/impl/nls.properties</include>
+          <include>overview.html</include>
+        </includes>
+      </resource>
+    </resources>
+
+    <plugins>
+      <plugin>
+        <groupId>com.helger.maven</groupId>
+        <artifactId>ph-javacc-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>javacc</id>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>javacc</goal>
+            </goals>
+            <configuration>
+              <jdkVersion>1.8</jdkVersion>
+              <sourceDirectory>${project.basedir}/../src/org/olap4j/mdx/parser/impl</sourceDirectory>
+              <outputDirectory>${project.build.directory}/generated-sources/javacc</outputDirectory>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <configuration>
+          <excludes>
+            <exclude>org/olap4j/driver/**</exclude>
+            <exclude>org/olap4j/sample/**</exclude>
+            <exclude>org/olap4j/mdx/parser/impl/MdxParser.jj</exclude>
+          </excludes>
+          <implicit>none</implicit>
+          <compilerArgs>
+            <arg>-sourcepath</arg>
+            <arg>doesnotexist</arg>
+          </compilerArgs>
+        </configuration>
+      </plugin>
+      <plugin>
+        <artifactId>maven-jar-plugin</artifactId>
+        <configuration>
+          <excludes>
+            <exclude>org/olap4j/driver/**</exclude>
+            <exclude>META-INF/services/java.sql.Driver</exclude>
+          </excludes>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

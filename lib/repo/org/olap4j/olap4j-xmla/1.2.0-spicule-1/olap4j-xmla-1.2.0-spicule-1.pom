@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.olap4j</groupId>
+    <artifactId>olap4j-parent</artifactId>
+    <version>1.2.0-spicule-1</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>olap4j-xmla</artifactId>
+  <packaging>jar</packaging>
+  <name>olap4j-xmla</name>
+  <description>olap4j driver for XML for Analysis</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.olap4j</groupId>
+      <artifactId>olap4j</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.vintage</groupId>
+      <artifactId>junit-vintage-engine</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <sourceDirectory>${project.basedir}/../src</sourceDirectory>
+
+    <resources>
+      <resource>
+        <directory>${project.basedir}/../src</directory>
+        <includes>
+          <include>META-INF/services/java.sql.Driver</include>
+        </includes>
+      </resource>
+    </resources>
+
+    <plugins>
+      <plugin>
+        <artifactId>maven-antrun-plugin</artifactId>
+        <version>3.1.0</version>
+        <executions>
+          <execution>
+            <id>generate-version</id>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>run</goal>
+            </goals>
+            <configuration>
+              <target>
+                <mkdir dir="${project.build.directory}/generated-sources/version/org/olap4j/driver/xmla"/>
+                <echo file="${project.build.directory}/generated-sources/version/org/olap4j/driver/xmla/XmlaOlap4jDriverVersion.java">/*
+ * Project version information. Generated - do not modify.
+ */
+package org.olap4j.driver.xmla;
+
+class XmlaOlap4jDriverVersion {
+    static final String NAME = "olap4j driver for XML/A";
+    static final String VERSION = "${project.version}";
+    static final int MAJOR_VERSION = 1;
+    static final int MINOR_VERSION = 2;
+}
+</echo>
+              </target>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>build-helper-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>add-version-source</id>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>add-source</goal>
+            </goals>
+            <configuration>
+              <sources>
+                <source>${project.build.directory}/generated-sources/version</source>
+              </sources>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <configuration>
+          <includes>
+            <include>org/olap4j/driver/**/*.java</include>
+            <include>org/olap4j/sample/**/*.java</include>
+          </includes>
+          <implicit>none</implicit>
+          <compilerArgs>
+            <arg>-sourcepath</arg>
+            <arg>doesnotexist</arg>
+          </compilerArgs>
+        </configuration>
+      </plugin>
+      <plugin>
+        <artifactId>maven-jar-plugin</artifactId>
+        <configuration>
+          <includes>
+            <include>org/olap4j/driver/**</include>
+            <include>org/olap4j/sample/**</include>
+            <include>META-INF/**</include>
+          </includes>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

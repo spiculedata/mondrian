@@ -28,6 +28,18 @@
     <olap4j-xmlaserver.version>1.3.0-spicule-jakarta</olap4j-xmlaserver.version>
   </properties>
 
+  <repositories>
+    <!-- In-tree Maven repo for custom Spicule-built deps (eigenbase-*, olap4j-spicule-*,
+         mondrian-data-foodmart-hsql) not published to Central. Keeps CI self-contained. -->
+    <repository>
+      <id>project-lib</id>
+      <name>Project-local in-tree repo</name>
+      <url>file://${project.basedir}/lib/repo</url>
+      <releases><enabled>true</enabled></releases>
+      <snapshots><enabled>false</enabled></snapshots>
+    </repository>
+  </repositories>
+
   <dependencies>
     <!-- TIER 1 safe bumps (same package). TIER 2 (commons-lang/collections/pool/dbcp/math, dom4j 2.x) follow in subsequent passes. -->
     <dependency><groupId>commons-collections</groupId><artifactId>commons-collections</artifactId><version>3.2.2</version></dependency>
