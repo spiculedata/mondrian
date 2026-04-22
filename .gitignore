@@ -2,6 +2,7 @@ dev-lib
 dist
 
 *.jar
+!lib/repo/**/*.jar
 *.log
 *.log.*
 *~
