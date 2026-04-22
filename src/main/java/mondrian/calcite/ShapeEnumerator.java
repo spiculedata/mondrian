@@ -93,11 +93,29 @@ final class ShapeEnumerator {
         Map<String, RolapSchema.PhysLink> factToDimLinks =
             collectFactToDimLinks(baseMg, factRel);
 
+        // If this MeasureGroup copy-links time_by_day.the_year we treat
+        // it as year-filtered: every emitted shape MUST contain the_year.
+        // FoodMart's agg tables are year=1997 filter-aggs; without this
+        // guard, a shape like {gender, marital_status} on agg_g_ms_pcat
+        // matches an all-time Mondrian query and drifts cells (see
+        // EquivalenceSmokeTest crossjoin regression, 2026-04-21). The
+        // heuristic is a proxy for "agg is year-filtered" — a proper
+        // fix needs MG-level filter-predicate metadata (Phase 2).
+        int yearIdx = indexOfYear(base);
+
         List<MvRegistry.ShapeSpec> out = new ArrayList<>();
         LinkedHashSet<String> seenShapeKey = new LinkedHashSet<>();
+        // When year is copy-linked, every emitted subset must include
+        // it. Its inclusion costs one slot against the cap, so the
+        // effective cap grows by one (cap+1, clamped to n) to keep the
+        // same richness for non-year cols. Otherwise straight power-set.
+        int effectiveCap = yearIdx < 0 ? cap : Math.min(cap + 1, n);
         for (int mask = 1; mask < (1 << n); mask++) {
             int k = Integer.bitCount(mask);
-            if (k > cap) {
+            if (k > effectiveCap) {
+                continue;
+            }
+            if (yearIdx >= 0 && (mask & (1 << yearIdx)) == 0) {
                 continue;
             }
             List<MvRegistry.GroupCol> subset = new ArrayList<>(k);
@@ -114,62 +132,19 @@ final class ShapeEnumerator {
                 out.add(spec);
             }
         }
-        // Year-prefix variants: Mondrian's implicit slicer often adds
-        // [Time].[Year] even when the MDX query doesn't mention it.
-        // For every enumerated shape that does NOT already contain
-        // the_year — and for which this MeasureGroup copy-links
-        // time_by_day.the_year — emit {year} ∪ subset. Matters most at
-        // the subset-size cap: the base power-set can't exceed cap, so
-        // year-prefix variants are the only way a cap-sized no-year
-        // subset gets its year-prefixed form into the registry.
-        MvRegistry.GroupCol yearCol = findYearCol(base);
-        if (yearCol != null) {
-            List<MvRegistry.ShapeSpec> yearVariants = new ArrayList<>();
-            for (MvRegistry.ShapeSpec s : out) {
-                if (containsYear(s.groups)) {
-                    continue;
-                }
-                List<MvRegistry.GroupCol> prefixed =
-                    new ArrayList<>(s.groups.size() + 1);
-                prefixed.add(yearCol);
-                prefixed.addAll(s.groups);
-                MvRegistry.ShapeSpec variant =
-                    buildShape(
-                        factToDimLinks, aggTable, factTable,
-                        measures, prefixed);
-                if (variant != null
-                    && seenShapeKey.add(shapeKey(variant)))
-                {
-                    yearVariants.add(variant);
-                }
-            }
-            out.addAll(yearVariants);
-        }
         return out;
     }
 
-    private static MvRegistry.GroupCol findYearCol(
-        List<MvRegistry.GroupCol> base)
-    {
-        for (MvRegistry.GroupCol g : base) {
+    private static int indexOfYear(List<MvRegistry.GroupCol> base) {
+        for (int i = 0; i < base.size(); i++) {
+            MvRegistry.GroupCol g = base.get(i);
             if ("time_by_day".equals(g.table)
                 && "the_year".equals(g.column))
             {
-                return g;
+                return i;
             }
         }
-        return null;
-    }
-
-    private static boolean containsYear(List<MvRegistry.GroupCol> groups) {
-        for (MvRegistry.GroupCol g : groups) {
-            if ("time_by_day".equals(g.table)
-                && "the_year".equals(g.column))
-            {
-                return true;
-            }
-        }
-        return false;
+        return -1;
     }
 
     /** Default max subset size, overridable via system property. */
@@ -207,7 +182,8 @@ final class ShapeEnumerator {
             factTable,
             measures,
             joins,
-            new ArrayList<>(subset));
+            new ArrayList<>(subset),
+            /* enumerated= */ true);
     }
 
     private static List<MvRegistry.DimJoin> requiredJoinsFor(

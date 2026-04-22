@@ -75,25 +75,18 @@ public class ShapeEnumeratorTest {
                 "expected non-empty shape list for agg_c_14",
                 shapes.isEmpty());
 
-            int n = MeasureGroupShapeInspector.copyLinkedColumns(mg).size();
-            // After dedup on (dim,col) key.
-            int distinct = distinctDimColCount(mg);
-            int cap = Math.min(4, distinct);
-            int expected = 0;
-            for (int k = 1; k <= cap; k++) {
-                expected += binomial(distinct, k);
+            // When the MG copy-links time_by_day.the_year, every emitted
+            // shape must include the_year (filter-agg guard — see
+            // ShapeEnumerator for rationale).
+            for (MvRegistry.ShapeSpec s : shapes) {
+                assertTrue(
+                    "every shape must contain the_year, got " + s.name,
+                    hasYear(s.groups));
             }
-            assertEquals(
-                "subset count mismatch — n=" + n
-                    + " distinct=" + distinct + " cap=" + cap,
-                expected, shapes.size());
 
-            // Singleton {the_year}, {quarter}, {month_of_year} all
-            // present.
+            // Singleton {the_year} is the only year-only shape; the
+            // multi-col shapes all extend it.
             assertTrue(containsGroup(shapes, "time_by_day", "the_year"));
-            assertTrue(containsGroup(shapes, "time_by_day", "quarter"));
-            assertTrue(
-                containsGroup(shapes, "time_by_day", "month_of_year"));
 
             // Each shape's joins are non-null and cover the subset's
             // dim tables.

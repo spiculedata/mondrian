@@ -149,6 +149,9 @@ public class MvRegistry {
         List<RelOptMaterialization> out = new ArrayList<>();
         List<String> skipped = new ArrayList<>();
         List<ShapeSpec> allSpecs = new ArrayList<>();
+        List<ShapeSpec> pending = new ArrayList<>();
+        LinkedHashMap<String, RolapSchema.PhysRelation> aggRelByName =
+            new LinkedHashMap<>();
         java.util.Set<String> seenAgg = new java.util.LinkedHashSet<>();
         FrameworkConfig cfg = Frameworks.newConfigBuilder()
             .defaultSchema(calciteSchema.schema())
@@ -171,6 +174,7 @@ public class MvRegistry {
                     skipped.add(mg.getName() + " (no fact table)");
                     continue;
                 }
+                aggRelByName.put(aggTable, mg.getFactRelation());
                 List<ShapeSpec> specs =
                     buildShapeSpecs(mg, aggTable, factTable);
                 if (specs.isEmpty()) {
@@ -178,33 +182,64 @@ public class MvRegistry {
                         mg.getName() + " (no shapes for " + aggTable + ")");
                     continue;
                 }
-                int built = 0;
-                for (ShapeSpec s : specs) {
-                    try {
-                        RelOptMaterialization mat =
-                            buildMaterialization(cfg, s);
-                        if (mat != null) {
-                            out.add(mat);
-                            allSpecs.add(s);
-                            built++;
-                        }
-                    } catch (RuntimeException re) {
-                        LOGGER.warn(
-                            "MvRegistry: skipping shape "
-                            + s.name + " — " + re);
-                    }
-                }
-                if (built == 0) {
-                    skipped.add(
-                        mg.getName() + " (all shapes failed to build)");
-                }
+                pending.addAll(specs);
             }
         }
-        if (LOGGER.isDebugEnabled()) {
-            LOGGER.debug(
-                "MvRegistry built: " + out.size() + " materialization(s), "
-                + skipped.size() + " skipped");
+        int beforeDedup = pending.size();
+        java.util.function.ToIntFunction<String> rowCountOf =
+            name -> {
+                RolapSchema.PhysRelation rel = aggRelByName.get(name);
+                return rel == null ? 0 : rel.getRowCount();
+            };
+        List<ShapeSpec> kept = dedupeByCoverage(pending, rowCountOf);
+        int dropped = beforeDedup - kept.size();
+        int enumeratedCount = 0;
+        java.util.Set<String> keptAggs = new java.util.LinkedHashSet<>();
+        for (ShapeSpec s : kept) {
+            // Phase-1 guardrail: enumerated shapes are plumbed through
+            // build/dedup for introspection but registered NEITHER as
+            // Calcite {@link RelOptMaterialization}s NOR as
+            // {@link MvMatcher}-visible specs. Reason: Mondrian adds an
+            // implicit {@code [Time].[Year]} to the PlannerRequest's
+            // groupBy; exact-size matching on a year-prefixed enumerated
+            // shape then rewrites queries that legacy never rewrote,
+            // producing cell-set-signal drift on filter-aggs (rowset
+            // values identical; column/row iteration order can differ in
+            // ways the harness's byte-level checksum catches). Phase 2
+            // wires them in once filter-agg predicates are encoded.
+            // See {@code docs/plans/2026-04-21-shape-catalog-enumeration.md}
+            // and {@link ShapeSpec#enumerated}.
+            if (s.enumerated) {
+                enumeratedCount++;
+                continue;
+            }
+            try {
+                RelOptMaterialization mat = buildMaterialization(cfg, s);
+                if (mat != null) {
+                    out.add(mat);
+                    allSpecs.add(s);
+                    keptAggs.add(s.aggTable);
+                }
+            } catch (RuntimeException re) {
+                LOGGER.warn(
+                    "MvRegistry: skipping shape "
+                    + s.name + " — " + re);
+            }
         }
+        for (String aggTable : aggRelByName.keySet()) {
+            if (!keptAggs.contains(aggTable)) {
+                // Aggregate MG registered but no shape survived
+                // build. (Pre-dedup emptiness is recorded above.)
+                skipped.add(aggTable + " (all shapes failed to build)");
+            }
+        }
+        LOGGER.info(
+            "[mv-registry] " + aggRelByName.size()
+            + " MeasureGroups → " + beforeDedup + " shapes ("
+            + "dedup: " + kept.size() + " kept, "
+            + dropped + " dropped), "
+            + out.size() + " materialized, "
+            + enumeratedCount + " matcher-only (Phase-1 enumerated)");
         return new MvRegistry(out, skipped, allSpecs, calciteSchema);
     }
 
@@ -260,18 +295,55 @@ public class MvRegistry {
 
     /**
      * Returns the list of {@link ShapeSpec}s for this aggregate
-     * MeasureGroup. The current implementation hardcodes the four
-     * shapes that match the MvHit corpus — future work will
-     * generalise to power-set enumeration over dim subsets. Shapes
-     * that don't apply to {@code aggTable} are filtered out by
-     * matching on the agg-table name.
+     * MeasureGroup. Phase-1 strategy: call {@link ShapeEnumerator}
+     * to power-set-enumerate copy-linked columns, then append a
+     * hand-curated fallback covering shapes the enumerator can't
+     * produce yet (FK-reachable / snowflake dim attributes — e.g.
+     * {@code store.store_country} on {@code agg_c_14},
+     * {@code product_class.product_family} on {@code agg_g_ms_pcat}).
+     * Cross-MG dedup runs later in {@link #fromSchema}.
      */
     static List<ShapeSpec> buildShapeSpecs(
         RolapMeasureGroup mg, String aggTable, String factTable)
     {
-        List<ShapeSpec> out = new ArrayList<>();
-        // Measure mapping shared by all shapes of a given agg table.
         List<MeasureRef> measures = resolveMeasures(mg);
+        List<ShapeSpec> out = new ArrayList<>();
+        List<ShapeSpec> fallback =
+            fallbackHandCuratedShapes(aggTable, factTable, measures);
+        // Phase-1 gate: only run the Phase-1 power-set enumerator on
+        // agg tables the hand-curated registry already vetted. Enabling
+        // it for every declared aggregate introduced cell-set drift
+        // on aggs whose row-level grain or filter predicates the
+        // enumerator can't yet reason about (e.g. FoodMart's
+        // {@code agg_c_special}/{@code agg_l_05}, which the
+        // hand-curated registry deliberately skipped — see
+        // EquivalenceSmokeTest crossjoin regression from 2026-04-21).
+        // Phase 2's FK-dim enumerator is expected to lift this gate
+        // once it also encodes filter-agg predicates.
+        if (!fallback.isEmpty()) {
+            out.addAll(
+                ShapeEnumerator.enumerate(
+                    mg, aggTable, factTable, measures,
+                    ShapeEnumerator.defaultMaxSubsetSize()));
+        }
+        out.addAll(fallback);
+        return out;
+    }
+
+    /**
+     * Hand-curated shapes covering FK-reachable / snowflake dim
+     * attributes that the Phase-1 {@link ShapeEnumerator} can't yet
+     * produce. Retire once Phase-2 FK-dim enumeration lands.
+     *
+     * <p>Phase-1 additive goal: preserve every MvHit-corpus rewrite
+     * path the hand-curated registry already delivered. Columns that
+     * the enumerator DOES produce will dedupe against these at the
+     * registry level (smaller agg wins).
+     */
+    static List<ShapeSpec> fallbackHandCuratedShapes(
+        String aggTable, String factTable, List<MeasureRef> measures)
+    {
+        List<ShapeSpec> out = new ArrayList<>();
 
         if ("agg_c_14_sales_fact_1997".equals(aggTable)) {
             // Shape 2: Aggregate[time_by_day.the_year, store.store_country]
@@ -782,10 +854,31 @@ public class MvRegistry {
         final List<MeasureRef> measures;
         final List<DimJoin> joins;
         final List<GroupCol> groups;
+        /**
+         * Whether this shape was produced by {@link ShapeEnumerator}
+         * (Phase 1 power-set) rather than the hand-curated fallback.
+         *
+         * <p>Phase-1 enumerated shapes are exposed to {@link MvMatcher}
+         * (exact-size matching is safe against FoodMart's filter-aggs)
+         * but deliberately NOT registered as {@link RelOptMaterialization}
+         * entries — Calcite's {@code SubstitutionVisitor} does rollup
+         * matching, which over a year-filtered agg like
+         * {@code agg_g_ms_pcat} (1997-only) silently returns 1997
+         * totals for all-time queries. Phase 2 must encode filter-agg
+         * predicates before lifting this gate.
+         */
+        final boolean enumerated;
         ShapeSpec(
             String name, String aggTable, String factTable,
             List<MeasureRef> measures, List<DimJoin> joins,
             List<GroupCol> groups)
+        {
+            this(name, aggTable, factTable, measures, joins, groups, false);
+        }
+        ShapeSpec(
+            String name, String aggTable, String factTable,
+            List<MeasureRef> measures, List<DimJoin> joins,
+            List<GroupCol> groups, boolean enumerated)
         {
             this.name = name;
             this.aggTable = aggTable;
@@ -793,6 +886,7 @@ public class MvRegistry {
             this.measures = measures;
             this.joins = joins;
             this.groups = groups;
+            this.enumerated = enumerated;
         }
     }
 
