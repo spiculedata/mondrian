@@ -12,6 +12,37 @@
 
 ---
 
+## Revision 2026-04-21 — codebase alignment
+
+Implementer flagged: Task 1's "for each `CopyLink` … for each `ForeignKeyLink`" doesn't map cleanly to runtime APIs. `CopyLink`/`ForeignKeyLink` are only XML bind types in `RolapSchemaLoader`. At runtime, `RolapMeasureGroup` exposes:
+
+- `getCopyColumnList()` → `List<Pair<RolapStar.Column, PhysColumn>>` — clean per-column copy metadata.
+- `dimensionMap` / `dimensionMap3` — `Dimension → PhysPath`. No direct "FK → target col" list; every dim has many attributes.
+
+So "groupable columns behind an FK link" is under-specified in the original plan. Existing hand-curated shapes include both copy-linked cols (`the_year` on `agg_c_14`) AND non-denormalised FK-reachable cols (`store.store_country` on `agg_c_14` — joins back through `dimensionMap`). Dropping FK dims entirely would regress real shapes.
+
+**Revised scope — two phases within this plan:**
+
+**Phase 1 — copy-link enumeration (Tasks 1–5, ship first):**
+- Task 1: `MeasureGroupShapeInspector.copyLinkedColumns(mg)` using `getCopyColumnList()`. Drop the FK part.
+- Task 2: assert all copy-linked cols appear in the enumeration. Concrete count deferred to Phase 2 (power-set of copy cols alone may not exceed hand-curated coverage — fine, that's additive).
+- Task 3 (year-prefix): works if `the_year` is copy-linked on the MG (it is for `agg_c_14` + `agg_g_ms_pcat`). Gate on presence of `the_year` in `getCopyColumnList()` output.
+- Task 4 (dedup / smaller-agg wins): `aggTable.rowCount` is not directly on `RolapStar.Table`. Use `RolapSchemaLoader`-populated `PhysTable.getRowCount()` if available (grep `getRowCount` on `PhysTable`/`PhysRelationImpl`); fall back to a stable tiebreaker — **column count** (fewer cols ⇒ narrower rows) or **alphabetical table name** for determinism. Flag the fallback in the commit message.
+- Task 5: replace `MvRegistry.buildShapeSpecs`'s hardcoded blocks. Iterate cubes: `for (RolapCube c : rolapSchema.getCubeList()) for (RolapMeasureGroup mg : c.getMeasureGroups()) if (mg.isAggregate())` — no `schema.getAggregateMeasureGroups()` helper exists. Preserve existing FK-reachable shapes (e.g. `agg_c_14::year-country`) by **also emitting the hand-curated shapes in a `fallbackHandCuratedShapes(aggTable)` helper** until Phase 2 lands.
+
+**Phase 2 — FK-dim enumeration (Tasks 8–10, follow-up PR):**
+- Task 8: for each FK-linked dim on the MG, enumerate **only the level attributes appearing in any declared `Hierarchy.Level`** (bounded, realistic — the universe Mondrian's planner might groupBy on). This is the "key-level attributes" question the implementer raised; the answer is level-column attributes across all hierarchies of that dim.
+- Task 9: cap combined subset size across copy + FK cols at `maxSubsetSize=4` (default). Multi-dim queries beyond that are the long tail.
+- Task 10: retire the Phase-1 `fallbackHandCuratedShapes` helper once FK enumeration covers the same shapes. Confirm via shape-name intersection.
+
+**Other fixes:**
+- Task 6 `GroupColKey`: new value type, 1 file. Implementer is correct — flag only.
+- Do not assert precise shape counts until Phase 1 is running; let the first green run establish the baseline.
+
+**If Phase 1 can't preserve all MvHit speedups** (matcher stops rewriting one of the 4 corpus queries), fall back to keeping `buildShapeSpecs`'s existing literals alongside the enumerated shapes — the goal is additive coverage, not deletion of what works.
+
+---
+
 ### Task 1: Catalog the link metadata per MeasureGroup
 
 **Files:**
