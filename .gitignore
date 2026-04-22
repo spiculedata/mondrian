@@ -29,3 +29,25 @@ mondrian.properties.template
 
 
 .worktrees/
+.DS_Store
+**/.DS_Store
+.claude/
+.vscode/
+*.iml
+nb-configuration.xml
+nbproject/
+hs_err_pid*.log
+*.swp
+*.swo
+.DS_Store
+**/.DS_Store
+.claude/
+.vscode/
+*.iml
+nb-configuration.xml
+nbproject/
+hs_err_pid*.log
+/tmp/
+*.swp
+*.swo
+
